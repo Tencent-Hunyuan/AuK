@@ -1,0 +1,124 @@
+name: Feature request
+description: Propose an improvement or new capability for AuK
+title: "[Feature] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Feature requests work best when they begin with a concrete user problem and measurable acceptance criteria.
+        Large changes may require design discussion before implementation.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight checks
+      options:
+        - label: I searched existing issues and pull requests for similar proposals.
+          required: true
+        - label: I read the contributing guide and considered the compatibility and maintenance impact.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or limitation
+      description: Describe the user need, current limitation, and who is affected.
+      placeholder: What cannot be done reliably or efficiently today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use case
+      description: Give a concrete workflow, input, and desired outcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Explain the behavior or interface being proposed. Include a sketch or pseudocode when useful.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe existing workarounds or other designs and their trade-offs.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Primary scope
+      options:
+        - Speech generation
+        - Speech or audio editing
+        - Model architecture or sampling
+        - Training or fine-tuning recipe
+        - Checkpoint or model format
+        - Evaluation or benchmarking
+        - Performance or memory
+        - Installation or platform compatibility
+        - Gradio interface
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: variant
+    attributes:
+      label: Target variant
+      options:
+        - AuK (Base)
+        - AuK-Flash
+        - Both variants
+        - New or external variant
+        - Not applicable
+    validations:
+      required: true
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and resource impact
+      description: Note expected API, configuration, checkpoint, dependency, GPU memory, latency, and output-quality effects.
+      placeholder: State known effects and mark unknown items clearly.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence or references
+      description: Link relevant papers, implementations, benchmarks, or related issues. State licenses and provenance when applicable.
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List observable conditions that would show the feature is complete.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: contribution
+    attributes:
+      label: Contribution plan
+      description: Indicate whether the reporter can help implement, test, document, or evaluate the proposal.
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Submission agreement
+      options:
+        - label: I confirm that this proposal follows the Code of Conduct and does not include confidential or unlicensed material.
+          required: true

@@ -1,0 +1,86 @@
+[build-system]
+requires = ["setuptools >= 61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auk"
+version = "0.1.0"
+description = "AuK: An Open-Source Foundational Model for Speech Generation and Editing"
+readme = "README.md"
+license = { text = "MIT License" }
+requires-python = ">=3.10"
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    # Keep the PyTorch family on the tested 2.7 ABI line. Users may preinstall a
+    # platform-specific CPU/CUDA build before installing AuK.
+    "torch>=2.7,<2.8",
+    "torchaudio>=2.7,<2.8",
+    "torchvision>=0.22,<0.23",
+    # Qwen2.5-Omni support landed in transformers 4.52; the release was validated on 4.57.
+    "transformers>=4.52.0,<5",
+    "qwen-omni-utils>=0.0.9",
+    "omegaconf>=2.3.0",
+    "torchdiffeq",
+    "x_transformers>=1.31.14",
+    # numpy is no longer imported directly (vae uses math.prod); it comes in transitively via
+    # transformers / gradio / librosa. Re-enable this pin only if you need to lock 1.x on py3.10.
+    # "numpy<=1.26.4; python_version<='3.10'",
+    "safetensors",
+]
+
+[project.optional-dependencies]
+# Gradio UI, Prompt Enhancer, cloud ASR, and local SenseVoice fallback.
+# Install with: pip install -e ".[gradio]"
+gradio = [
+    "gradio>=6.0.0",
+    "PyYAML>=6.0",
+    "silero-vad>=6.0",
+    "WeTextProcessing>=1.2.0",
+    "pyloudnorm>=0.2.0",
+    "openai>=1.0.0",
+    "tencentcloud-sdk-python-asr>=3.0.0",
+    "funasr>=1.3,<2",
+    "modelscope>=1.20,<2",
+]
+
+# Extra deps for full DiT fine-tuning (src/auk/train/train.py). Not needed for inference.
+# Install with: pip install -e ".[train]"
+train = [
+    "accelerate>=0.33.0",
+    "ema-pytorch",
+    "tensorboard",
+    "matplotlib",
+    "tqdm",
+]
+
+[project.scripts]
+"auk-infer" = "auk.infer.infer_cli:main"
+"auk-gradio" = "auk.infer.infer_gradio:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["auk*"]
+
+[tool.setuptools.package-data]
+"auk.infer" = ["pe.config.yaml"]
+"auk.model.vae.modules.commons" = ["assets/*.npz"]
+
+[tool.ruff]
+extend-exclude = ["src/auk/model/vae/"]
+line-length = 130
+target-version = "py310"
+
+[tool.ruff.lint]
+# Only ignore variables with names starting with "_".
+dummy-variable-rgx = "^_.*$"
+
+[tool.ruff.lint.per-file-ignores]
+"src/auk/model/vae/**" = ["E741", "F841", "F821", "F401", "F403", "F405"]
+
+[tool.ruff.lint.isort]
+force-single-line = false
+lines-after-imports = 2

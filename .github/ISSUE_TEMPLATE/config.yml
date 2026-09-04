@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security or Code of Conduct report
+    url: mailto:zhikangniu@sjtu.edu.cn
+    about: Report security vulnerabilities or conduct incidents privately by email, not in a public issue.

@@ -1,0 +1,1534 @@
+api:
+  llm:
+    max_tokens: 4096
+    temperature: 0
+    timeout_sec: 120
+  asr:
+    endpoint: asr.tencentcloudapi.com
+    engine_model_type: 16k_zh_en
+    sample_rate: 16000
+    max_duration_sec: 60
+    max_data_bytes: 5242880
+    timeout_sec: 30
+    poll_interval_sec: 1
+prompts:
+  classify: |-
+    你是一个语音/音频编辑指令的单任务分类器（task classifier）。用户会用口语化、随意的中文或英文描述他们想对一段语音/音频做的一个编辑。你的任务：把它归到下面「支持的任务类型」中恰好一个 task，并抽出该 task 需要的结构化参数——不要自己拼最终指令，最终标准 instruction 由后续代码按模板机械生成。
+
+    规则：
+    1. 从下面「支持的任务类型」里选出最匹配的一个 task_type。**尽量归类**：即使用户措辞与某个 task 不完全吻合，只要能沾边就归到语义最接近的那个 task；在多个相近 task 之间拿不准时，选最接近的一个（在 reasoning 里说明为何选它、排除了哪些相近项），不要因为「不完全匹配」就判 unsupported。通常用户一句话含多个互不相关的编辑意图时，只取最主要/最先提到的一个。但 SE/SS/SR 是例外：`enhance_speech`、`separate_speech`、`improve_quality` 中显式附加的去噪、去混响属于该任务训练时支持的 instruction 变体，不是需要拆开的组合任务；应保留主任务，并按下面规则抽取 `cleanup_mode`。
+    2. 有 operation_subtype 的 task（如 content_edit 的 insert_before/insert_after/delete/delete_before/delete_after/replace）必须给出正确的 operation_subtype。
+    3. 按该 task 的「槽位」从用户原话里抽出 params_extracted（要改的原词/新词、锚点、目标情感、语速倍数、音色/风格描述、要念的文本等），逐字保留用户给的关键内容（含标点），不要自己增删事实。离散档位（语速/音量/音调/情感）按该 task 的「归一参考」归到最近的合法档位/标签；拿不准时给最接近的合法值（下游还会再做一次机械 snap 兜底）。
+    4. instruct_tts / voice_edit 只需把用户原话里的简短风格/音色描述放进对应槽位即可，不要自己扩写（后续代码会按需扩写）。
+    5. 是否可行 supported（**默认 supported=true，尽量不要判 unsupported**）：
+       - 优先归到最接近的 task（见规则 1）。只有当整句请求**明显、彻底**超出全部任务类型、确实无法用任何一个 task 近似达成时（典型如：翻译、转文字/ASR、打分、总结、问答对话、克隆成某个指定明星本人的音色、加背景音乐/编曲、生成音效或音乐等），才 supported=false、task_type=unsupported。仅仅是措辞不典型、或介于几个 task 之间，都**不算** unsupported——归到最接近的那个即可。
+       - 目标等于原状态的无操作（正常语速/0 分贝/0 半音/情感不变）→ supported=false（属「无需改动」，不是能力外）。
+       - 识别为合成任务（instruct_tts / zero_shot_tts）但用户没给「要念的文本」→ supported=false 且 needs_text=true，reasoning 请他补充要合成的文本。
+    6. language：用户指令的主要语言，'zh' 或 'en'，决定下游用中文还是英文标准模板。另外，仅当 task 是合成类（instruct_tts / zero_shot_tts）时，再判定 text_language——即 params_extracted 里「要念的文本」(text 槽)**本身**的语言（'zh' 或 'en'，决定对该待合成文本做中文还是英文的文本规范化）；text_language 可能与 language 不同（例如用中文指令要求合成一段英文文本，此时 language=zh 而 text_language=en）。非合成类 task 一律置 text_language=null。
+    7. 输入音频（若有）会在用户消息后附上它的 ASR 转写文本（可能有识别误差）：可据此更准地定位 content_edit 的 anchor/target 原词、校验 language、理解要编辑的实际内容；转写仅供参考，用户显式给的原词/新词仍以用户指令为准。
+    8. 参考/输入音频：用户消息开头会标注「已上传参考/输入音频」或「未上传任何参考/输入音频」，据此选 task——
+       - 已上传音频：可选需要输入音频的编辑类（content_edit / speed_edit / volume_edit / emotion_edit / enhance_speech / whisper_edit / … 等）或音色克隆 zero_shot_tts（用这段音频的音色念新文本）。
+       - 未上传音频：只能做纯文本合成 instruct_tts（用文字描述音色/风格 + 要念的文本）；不要选需要输入音频的编辑类，也不要选需要参考音频的 zero_shot_tts。
+    9. SE/SS/SR 的 `cleanup_mode` 只按用户**显式说出的要求**抽取，不要根据“纯净、清晰、音质好”等泛化词自行补充：
+       - 明确只要求降噪/去噪/去底噪/去杂音 → `cleanup_mode="denoise"`
+       - 明确只要求去混响/去回声 → `cleanup_mode="dereverb"`
+       - 明确同时要求去噪和去混响 → `cleanup_mode="denoise_dereverb"`
+       - 未明确说去噪或去混响 → 不要输出该槽位
+       - 例：“只保留第一个说话的人，并去噪、去混响”仍是 `separate_speech/by_order`，抽取 `n=1, cleanup_mode="denoise_dereverb"`。
+       - 例：“提升清晰度、补充高频，并降噪去混响”仍是 `improve_quality/bandwidth_extension`，抽取 `cleanup_mode="denoise_dereverb"`。
+       - 例：“去掉电话感，同时降噪”仍是 `improve_quality/remove_effect`，抽取 `effect="电话", cleanup_mode="denoise"`。
+       - `remove_effect` 的 effect 应保留用户指出的具体退化，例如电话、扩音器、水下闷声、削波/破音、丢包/瞬断、直流偏置。
+       - 下游只会在 instruction 库中存在精确变体时使用该融合 wording；没有对应变体时会保持该主任务原有 instruction，因此不要把这类请求判成 unsupported，也不要拆成多步。
+    10. `extract_vocals` 必须区分歌声与说话：
+       - “只提取歌唱的声音，不要说话的声音” → `operation_subtype="singing_only"`。
+       - “只保留歌声，去掉说话和伴奏” → `operation_subtype="singing_only"`。
+       - “提取所有人声，包括说话和歌唱，去掉伴奏” → `operation_subtype="all_human_voices"`。
+
+    # 支持的任务类型
+
+    {capabilities}
+
+    # 输出格式
+
+    只输出一个 JSON 对象（不要输出 JSON 以外任何文字、不要加代码块围栏）：
+    {{
+      "supported": true 或 false,
+      "task_type": "上面枚举之一，或 unsupported",
+      "operation_subtype": "该 task 的子类型或 null",
+      "params_extracted": {{"槽位名": "值"}},
+      "needs_text": true 或 false,
+      "reasoning": "中文说明：怎么归类、档位怎么归一、多意图时只做哪个、拒绝原因等",
+      "language": "zh" 或 "en",
+      "text_language": "zh" 或 "en" 或 null（仅合成类 instruct_tts/zero_shot_tts 给待合成文本的语言，其余为 null）
+    }}
+
+    只输出 JSON。
+  rewrite: |-
+    {task_context}
+
+    你只做一件事：把“{slot}”在保持用户给出的所有事实不变的前提下扩写成上面示例那样的多维度自然语言描述。
+    不要输出模板全文、不要输出要念的文本、不要判断任务类型。只输出 JSON：
+    {{"{slot}": "扩写后的描述"}}，不要加代码块围栏。
+    {output_language_rule}
+  rewrite_language_rules:
+    zh: 扩写后的“{slot}”必须以中文为主体，无论原始描述或待念文本是什么语言；英文专有名词可以保留，但禁止输出纯英文描述。
+    en: 扩写后的“{slot}”必须使用英文，禁止输出中文描述。
+  nonverbal_event_match: |-
+    你只负责把非语言声编辑请求中的声音名称映射到给定事件表中的一个 canonical event。
+
+    规则：
+    - 只根据用户明确要求增加或删除的非语言声音判断，不要根据输入音频中可能已有的声音猜测。
+    - 必须从事件表中选择恰好一个 event id，不得创造新 id。
+    - 同义词、口语说法和拟声表达应映射到语义最接近的事件。
+    - 如果没有完全一致的名称，选择语义最接近的事件，并在 reasoning 中简要说明。
+
+    事件表：
+    {events}
+
+    只输出 JSON，不要代码块：
+    {{"event":"事件表中的 canonical event id","reasoning":"中文简要理由"}}
+  instruct_tts_duration: |-
+    You are an expert speech-duration estimator for text-to-speech.
+
+    Estimate the final spoken-audio duration in seconds from:
+    - language;
+    - exact normalized content that will be synthesized;
+    - the expanded style instruction that will be sent to the speech model;
+    - an F5 baseline duration calibrated for ordinary speaking.
+
+    Adjust the F5 baseline using all duration-relevant information in the style instruction:
+    speaking speed/cadence, pauses, hesitation, drawn-out sounds, singing, clipped delivery, and local
+    speed changes. Do not change the content. Do not adjust for emotion, pitch, volume, age, or accent
+    unless the description explicitly implies timing behavior. For mixed speeds, estimate a
+    time-weighted overall duration. The F5 baseline is a strong prior, not a mandatory answer.
+
+    Return JSON only:
+    {"results":[{"key":"request","duration_sec":4.25,"ratio":1.08}]}
+runtime:
+  duration:
+    seconds_per_utf8_byte:
+      en: 0.0656
+      zh: 0.0803
+    f5:
+      sample_rate: 24000
+      hop_length: 256
+      short_text_byte_threshold: 10
+      short_text_speed: 0.3
+    output_frames_per_second: 50
+    instruct_tts_prompt_version: instructtts_duration_v1_20260822
+  vad:
+    skip_tasks: [enhance_speech, separate_speech, extract_vocals, improve_quality, nonverbal_edit, vocal_edit]
+    trim_padding_sec: 0.1
+    low_rms_threshold: 0.05
+    normalized_peak: 0.99
+  whisper:
+    target_lufs: -44.47
+    target_rms: 0.0064
+    to_normal_target_rms: 0.000707945784384138
+    peak_ceiling: 0.95
+  cleanup_keywords:
+    denoise:
+    - 去噪
+    - 降噪
+    - 去底噪
+    - 去杂音
+    - 去除噪声
+    - 去除背景噪声
+    - denoise
+    - noise reduction
+    - remove noise
+    - remove background noise
+    - remove only the background noise
+    dereverb:
+    - 去混响
+    - 去回声
+    - 消除混响
+    - 消除回声
+    - 去除房间混响
+    - 去除噪声和混响
+    - dereverb
+    - remove reverb
+    - remove reverberation
+    - remove echo
+    - remove only the room reverberation
+    - remove noise and reverberation
+  effect_aliases:
+    telephone: [电话, telephone, phone]
+    megaphone: [扩音器, 喇叭, megaphone, loudspeaker, bullhorn]
+    underwater: [水下, 闷, underwater, muffled]
+    clipping: [削波, 破音, 爆音, clipping, clipped]
+    dropout: [丢包, 瞬断, 脱落, dropout, cut-off, cutoff]
+    dc_offset: [直流偏置, dc offset, dc_offset]
+  effect_fallback: _generic
+tasks:
+  content_edit:
+    name: 内容编辑
+    needs_audio: true
+    needs_text: false
+    description: |
+      改「说了什么」的文字内容，声音/音色不变，需要输入语音。 Use for: 可逐字落到 插入/删除/替换 的确切内容改动（把'今天'改成'明天'、删掉'那个'、在'你好'后加'呀'）；删除时若目标词在音频里多处出现，用锚点定位删的是锚点前(delete_before)还是锚点后(delete_after)的那个，如"删掉'谢谢'后面那个'再见'"→delete_after(anchor=谢谢, target=再见)。 Do NOT use: 风格/音色/情感/语速改动、改写润色翻译；一句里多处同时编辑须拆成多步（本模型单条只表达一个编辑意图）。 vs vocal_edit: content_edit 针对普通说话录音；vocal_edit 针对歌唱录音的歌词。 Example: 把'今天下午开会'改成'明天上午开会' -> subtype=replace, orig=今天下午开会, new=明天上午开会。
+    subtypes: [insert_before, insert_after, delete, delete_before, delete_after, replace]
+    params:
+    - name: anchor
+      type: string
+      required_for: [insert_before, insert_after, delete_before, delete_after]
+    - name: text
+      type: string
+      required_for: [insert_before, insert_after]
+    - name: target
+      type: string
+      required_for: [delete, delete_before, delete_after]
+    - name: orig
+      type: string
+      required_for: [replace]
+    - name: new
+      type: string
+      required_for: [replace]
+    duration:
+      strategy: content_scaled
+    templates:
+      zh:
+        insert_before: 在‘{anchor}’前面加上‘{text}’
+        insert_after: 在‘{anchor}’后面加上‘{text}’
+        delete: 删掉‘{target}’
+        delete_before: 删掉‘{anchor}’前的‘{target}’
+        delete_after: 删掉‘{anchor}’后的‘{target}’
+        replace: 把‘{orig}’改成‘{new}’
+      en:
+        insert_before: Add '{text}' before '{anchor}'.
+        insert_after: Add '{text}' after '{anchor}'.
+        delete: Remove '{target}'.
+        delete_before: Remove '{target}' before '{anchor}'.
+        delete_after: Remove '{target}' after '{anchor}'.
+        replace: Replace '{orig}' with '{new}'.
+  speed_edit:
+    name: 语速调整
+    needs_audio: true
+    needs_text: false
+    description: |
+      调节语速，音色/内容不变，需要输入语音。 Use for: 明确的语速加快/放慢请求。 Do NOT use: 无法安全映射到合法档位的模糊请求（如「更紧凑一点」）；正常语速/1倍/不变属无操作 -> 判不支持。 Example: 说太快了慢一点 -> speed_multiplier=0.75。
+    params:
+    - name: speed_multiplier
+      type: float
+      required: true
+      choices: [0.5, 0.75, 1.25, 1.5, 2.0]
+      normalization_hints: [慢一点/稍慢 -> 0.75, 慢很多/慢一半 -> 0.5, 快一点/稍快 -> 1.25, 快很多/快一倍/两倍/2倍 -> 2.0, 非法值(如1.8) -> snap 到最近档位(2.0)]
+    duration:
+      strategy: speed_scaled
+    templates:
+      zh: 将语速调整为{speed_multiplier}倍。
+      en: Adjust the speech speed to {speed_multiplier}x.
+  volume_edit:
+    name: 音量调整
+    needs_audio: true
+    needs_text: false
+    description: |
+      调节音量，内容/音色不变，需要输入语音。 Use for: 明确的调大/调小音量请求。 Do NOT use: 0dB/不变属无操作 -> 判不支持；方向由 increase/decrease 决定。 Example: 声音大一点 -> subtype=increase, gain_db=5。
+    subtypes: [increase, decrease]
+    params:
+    - name: gain_db
+      type: int
+      required: true
+      choices: [5, 10, 15]
+      normalization_hints: [大声一点/小声一点 -> 5, 大很多/小很多 -> 10 或 15, 非法 dB -> snap 到最近档位]
+    duration:
+      strategy: equal_length
+    templates:
+      zh:
+        increase: 将音量升高{gain_db}分贝。
+        decrease: 将音量降低{gain_db}分贝。
+      en:
+        increase: Increase the volume by {gain_db} dB.
+        decrease: Decrease the volume by {gain_db} dB.
+  pitch_edit:
+    name: 音调调整
+    needs_audio: true
+    needs_text: false
+    description: |
+      调节音调（半音），内容/音色不变，需要输入语音。 Use for: 明确的音调升高/降低请求。 Do NOT use: 音色转换/情感转换（那是 voice_edit/emotion_edit）；0 半音/不变属无操作 -> 判不支持。 Example: 声音再低沉一点 -> subtype=decrease, semitones=1。
+    subtypes: [increase, decrease]
+    params:
+    - name: semitones
+      type: int
+      required: true
+      choices: [1, 2, 3]
+      normalization_hints: [高一点/尖一点 -> 1, 低一点/低沉一点 -> 1, 高很多/低很多 -> 2 或 3]
+    duration:
+      strategy: equal_length
+    templates:
+      zh:
+        increase: 将音调升高{semitones}个半音。
+        decrease: 将音调降低{semitones}个半音。
+      en:
+        increase: Raise the pitch by {semitones} semitones.
+        decrease: Lower the pitch by {semitones} semitones.
+  emotion_edit:
+    name: 情感转换
+    needs_audio: true
+    needs_text: false
+    description: |
+      转换说话情感，内容/音色不变，需要输入语音。 Use for: 显式的情感转换请求，可映射到 8 种合法情感之一。 Do NOT use: 音色克隆/音调升降/措辞编辑；无法映射到 8 种情感 -> 判不支持。 Example: 让他听起来开心点 -> emotion=happy。
+    params:
+    - name: emotion
+      type: string
+      required: true
+      choices: [happy, angry, sad, fearful, surprised, disgusted, calm, excited]
+      labels:
+        happy:
+          zh: 开心
+          en: happy
+        angry:
+          zh: 愤怒
+          en: angry
+        sad:
+          zh: 悲伤
+          en: sad
+        fearful:
+          zh: 恐惧
+          en: fearful
+        surprised:
+          zh: 惊讶
+          en: surprised
+        disgusted:
+          zh: 厌恶
+          en: disgusted
+        calm:
+          zh: 平静
+          en: calm
+        excited:
+          zh: 兴奋
+          en: excited
+      normalization_hints:
+      - 开心/高兴/愉快 -> happy；生气/愤怒/恼怒 -> angry；难过/伤心/悲伤 -> sad
+      - 害怕/恐惧 -> fearful；惊讶/吃惊 -> surprised；厌恶/嫌弃/反感 -> disgusted
+      - 平静/冷静/淡定 -> calm；兴奋/激动 -> excited
+    duration:
+      strategy: equal_length
+      emotion_multipliers:
+        sad: 1.22
+        fearful: 1.16
+        happy: 1.06
+        angry: 1.06
+        surprised: 1.06
+        disgusted: 1.06
+        calm: 1.06
+        excited: 1.06
+      default_emotion_multiplier: 1.06
+    templates:
+      zh: 将情感转变为{emotion}。
+      en: Change the emotion to {emotion}.
+  enhance_speech:
+    name: 语音增强
+    needs_audio: true
+    needs_text: false
+    description: |
+      语音增强：去噪 + 去混响，保留所有说话人，输出等长干净人声，需要输入语音。 Use for: 降噪/去噪/去底噪/清理杂音/去混响/让声音干净点。 Do NOT use: 只保留某人（separate_speech）、提取歌声（extract_vocals）、带宽/音色/清晰度修复（improve_quality）。 用户显式要求只去噪、只去混响或二者都去时，可抽取 cleanup_mode 选择训练库中的精确 instruction 变体； 未显式要求时不要自行添加，库中无精确变体时渲染侧保持原 instruction。
+    params:
+    - name: cleanup_mode
+      type: string
+      choices: [denoise, dereverb, denoise_dereverb]
+      normalization_hints: [只说降噪/去噪/去底噪/去杂音 -> denoise, 只说去混响/去回声 -> dereverb, 同时明确说去噪和去混响 -> denoise_dereverb]
+    duration:
+      strategy: equal_length
+    templates:
+      zh: 请清理这段输入语音，不做说话人删除，并去除房间混响，输出干净的人声结果。
+  separate_speech:
+    name: 说话人分离
+    needs_audio: true
+    needs_text: false
+    description: |
+      多说话人里只保留某人，输出等长纯净人声，需要输入语音。 Use for: 只留说某句话的人（by_content）、只保留第 n 个开始说话的人（by_order）。 Do NOT use: 通用降噪、提取歌声、按内容间接指代时先做理解。 用户在说话人选择之外显式要求去噪/去混响时，仍属于本任务支持的 instruction 变体， 抽取 cleanup_mode；未显式要求时不要自行添加，库中无精确变体时渲染侧保持原 instruction。 Example: 只保留第一个说话的人 -> subtype=by_order, n=1。
+    subtypes: [by_content, by_order]
+    params:
+    - name: text
+      type: string
+      required_for: [by_content]
+    - name: n
+      type: int
+      required_for: [by_order]
+    - name: cleanup_mode
+      type: string
+      choices: [denoise, dereverb, denoise_dereverb]
+      normalization_hints: [只说降噪/去噪/去底噪/去杂音 -> denoise, 只说去混响/去回声 -> dereverb, 同时明确说去噪和去混响 -> denoise_dereverb]
+    duration:
+      strategy: equal_length
+    templates:
+      zh:
+        by_content: 请只保留说'{text}'的人，去掉其他说话人，输出等长纯净人声。
+        by_order: 这段音频中只保留第{n_zh}个开始说话的人对应的语音，去掉其余说话人。
+  extract_vocals:
+    name: 提取人声
+    needs_audio: true
+    needs_text: false
+    description: |
+      从混音中提取歌声或全部人声，需要输入音频。 Use for: 只保留歌唱声、去掉说话与伴奏时选 singing_only；明确要求保留说话+歌声、 只去伴奏时选 all_human_voices。 Do NOT use: 会议里挑某个说话人（separate_speech）、说话录音降噪（enhance_speech）。 Example: 只提取歌唱的声音不要说话 -> subtype=singing_only； 提取所有人声包括说话和歌唱去掉伴奏 -> subtype=all_human_voices。
+    subtypes: [singing_only, all_human_voices]
+    duration:
+      strategy: equal_length
+    templates:
+      zh:
+        singing_only: 请只保留歌声，其余声音都去掉。
+        all_human_voices: 请保留所有人声，说话和歌唱都算，其余声音都去掉。
+      en:
+        singing_only: Keep only the singing voice, drop everything else.
+        all_human_voices: Keep all human voices, speech and singing alike, drop everything else.
+  improve_quality:
+    name: 音质提升
+    needs_audio: true
+    needs_text: false
+    description: |
+      音质提升：带宽扩展、去电话/扩音器音色、恢复清晰度，需要输入语音。 Use for: 音质太差/像电话/像扩音器/水下闷声/削波破音/丢包瞬断/直流偏置/提升清晰度/补高频。 Do NOT use: 单纯噪声+混响的「脏」用 enhance_speech；本类针对带宽/音色/清晰度的「闷/糊/电话感」。 用户在带宽扩展或去音色之外显式要求去噪/去混响时，仍属于本任务支持的 instruction 变体， 抽取 cleanup_mode；未显式要求时不要自行添加，库中无精确变体时渲染侧保持原 instruction。 Example: 音质太差像打电话 -> subtype=remove_effect, effect=电话。
+    subtypes: [bandwidth_extension, remove_effect]
+    params:
+    - name: effect
+      type: string
+      required_for: [remove_effect]
+    - name: cleanup_mode
+      type: string
+      choices: [denoise, dereverb, denoise_dereverb]
+      normalization_hints: [只说降噪/去噪/去底噪/去杂音 -> denoise, 只说去混响/去回声 -> dereverb, 同时明确说去噪和去混响 -> denoise_dereverb]
+    duration:
+      strategy: equal_length
+    templates:
+      zh:
+        bandwidth_extension: 请对这段语音做超分辨率/带宽扩展处理，恢复被削掉的高频成分，输出宽带纯净人声。
+        remove_effect: 请消除这段音频的{effect}音色，这段音频带有混响，请恢复成无混响的干声，输出自然清晰的人声。
+  instruct_tts:
+    name: 文本合成
+    needs_audio: false
+    needs_text: true
+    description: |
+      用文字描述音色/风格从零合成语音，不依赖参考音频，需要「要念的文本」。 Use for: 用户用文字描述想要的嗓音/风格（「用年轻女生温柔的语气说…」）且给了要念的文本。 Do NOT use: 要克隆某段参考音色（zero_shot_tts）；保留原音频只改音色（voice_edit）；没给要念文本时判不支持并提示补文本。 vs zero_shot_tts: instruct_tts 音色随机、无参考音；zero_shot_tts 克隆参考音频音色。 vs voice_edit: instruct_tts 无输入音频、合成新文本；voice_edit 有输入音频、保留原内容只改音色。 Example: style_desc=年轻女生温柔体贴的语气, text=欢迎回来今天上班累不累呀。
+    params:
+    - name: style_desc
+      type: string
+      required: true
+    - name: text
+      type: string
+      required: true
+    duration:
+      strategy: tts_by_text
+    templates:
+      zh: '请基于下面的描述: "{style_desc}",生成语音内容"{text}".'
+      en: 'Based on the following description: "{style_desc}", generate speech content "{text}".'
+    rewrite:
+      slot: style_desc
+      instructions: |
+        结合要念内容，在保持用户给出所有事实（性别/年龄/语气/情绪/语速）不变的前提下，把 style_desc 扩写成一段流畅的多维度自然语言描述（可自然补充与用户意图相符的音高/语速/音量/音色质感/语调/清晰度）； 不得引入与用户明确意图冲突的事实，不得虚构具体身份（指定某人本人/编造口音方言）。 扩写后的 style_desc 必须与待念文本使用同一种语言；text 逐字保留、不改动。
+      template_rules: |
+        模板里的冒号、逗号、引号、句点都用英文半角；text 逐字填入不得改动。 英文待念文本使用英文模板和英文 style_desc，中文待念文本使用中文模板和中文 style_desc。
+      output_language: text_language
+      example:
+        before: 用年轻女生的温柔体贴的语气说“宝宝，欢迎回来，今天上班累不累呀”
+        after: '请基于下面的描述: "一位二十多岁的女朋友，在恋人刚下班回家时，用温柔、关心、略带撒娇的语气询问他今天累不累。声音亲近自然，语速稍慢，句尾轻轻上扬。",生成语音内容"宝宝，欢迎回来，今天上班累不累呀".'
+  zero_shot_tts:
+    name: 音色克隆
+    needs_audio: true
+    needs_text: true
+    description: |
+      用上传参考音频的说话人音色念出指定文本，需要参考音频 + 「要念的文本」。 Use for: 用这个人/这段音频的声音说…、用同样的声音念…、克隆这个音色说…。 Do NOT use: 原地改说话内容（content_edit）；无参考音的纯文字描述合成（instruct_tts）；缺要念文本时判不支持。 vs instruct_tts: zero_shot_tts 克隆参考音频音色；instruct_tts 用文字描述风格、音色随机。 Example: 用这个人的声音说“大家好，欢迎收看今天的节目” -> text=大家好，欢迎收看今天的节目。
+    params:
+    - name: text
+      type: string
+      required: true
+    duration:
+      strategy: tts_by_text
+    templates:
+      zh: 'Say the following with the same voice: "{text}"'
+      en: 'Say the following with the same voice: "{text}"'
+  voice_edit:
+    name: 音色编辑
+    needs_audio: true
+    needs_text: false
+    description: |
+      保留说话内容不变，用文字描述把嗓音/音色换成目标音色，需要输入语音。 Use for: 保留原话内容、只把音色换成文字描述的目标（换成低沉磁性的男声、变成清亮的年轻女声）。 Do NOT use: 合成新文本（instruct_tts）；克隆参考音色（zero_shot_tts）；情感/音调调整。 vs zero_shot_tts: voice_edit 用文字描述目标音色；zero_shot_tts 用参考音频克隆音色。 Example: 把这段话的声音换成低沉磁性的男声内容别变 -> timbre_desc=低沉磁性的男声。
+    params:
+    - name: timbre_desc
+      type: string
+      required: true
+    duration:
+      strategy: equal_length
+    templates:
+      zh: 请将这段音频的音色修改为符合以下描述的声音：“{timbre_desc}”。
+      en: 'Keep the spoken content unchanged and change the timbre to: "{timbre_desc}".'
+    rewrite:
+      slot: timbre_desc
+      instructions: |
+        结合文字内容，在保持用户给出的目标音色事实（性别/年龄/音高/语速/风格）不变的前提下，把 timbre_desc 扩写成一段流畅的多维度自然语言音色描述（可自然补充音色质感/语调/清晰度等）；不得引入与用户意图冲突的事实， 不得虚构具体身份。
+      example:
+        before: 请将这段音频的音色修改为符合以下描述的声音：“这位说话人是一位年轻女性”。
+        after: 请将这段音频的音色修改为符合以下描述的声音：“这位说话人是一位音色清亮的年轻女性，语速平稳，吐字清晰。她的语气真诚而温柔，带有一种抚慰人心的治愈感，具有走心开导的风格。”。
+      template_rules: ''
+  nonverbal_edit:
+    name: 非语言声编辑
+    needs_audio: true
+    needs_text: false
+    description: |
+      增删呼吸声/换气声/喘气声/笑声/语气词等非说话内容的声音，需要输入语音。 Use for: 删除某种非语言声、在锚点前后或语音开头结尾增加某种非语言声。 Do NOT use: 说话内容文字编辑（content_edit）；无法归入非语言声事件的请求。 Example: 在开头加一声笑 -> subtype=add_head, sound=笑声。
+    subtypes: [delete, add_after, add_before, add_head, add_tail]
+    params:
+    - name: sound
+      type: string
+      required_for: [delete, add_after, add_before, add_head, add_tail]
+    - name: anchor
+      type: string
+      required_for: [add_after, add_before]
+    duration:
+      strategy: equal_length
+      nonverbal_adjustments:
+      - keywords: [呼吸, 换气, 喘, breath, breathing, pant, inhale, exhale]
+        add: 0.35
+        delete: -0.6
+      - keywords: [咂嘴, 咂舌, 吸鼻, 倒吸, 惊讶, tsk, smack, sniff, gasp]
+        add: 0.5
+        delete: -1.0
+      - keywords: [笑, 叹气, 咳, 清嗓, 语气, laugh, laughter, chuckle, sigh, cough, throat, clearing]
+        add: 0.75
+        delete: -1.05
+      default_nonverbal_adjustment:
+        add: 0.55
+        delete: -0.9
+    templates:
+      zh:
+        delete: 删除音频中所有的{sound}。
+        add_after: 在“{anchor}”后增加{sound}。
+        add_before: 在“{anchor}”前增加{sound}。
+        add_head: 在语音开头增加{sound}。
+        add_tail: 在语音结尾增加{sound}。
+      en:
+        delete: Remove all the {sound} from the audio.
+  whisper_edit:
+    name: 耳语转换
+    needs_audio: true
+    needs_text: false
+    description: |
+      耳语↔正常互转：把耳语转成正常发声，或把正常说话转成耳语；说话内容与音色不变，需要输入语音。 Use for: 转成正常说话/别耳语了/正常发声（to_normal）；转成耳语/悄悄说/用气声说（to_whisper）。 Do NOT use: 音量调整（volume_edit）；只改发声方式，不改内容与音色。 Example: 把这段话转换成耳语 -> subtype=to_whisper。
+    subtypes: [to_normal, to_whisper]
+    duration:
+      strategy: equal_length
+    templates:
+      zh:
+        to_normal: 把这段耳语转换成正常说话的声音。
+        to_whisper: 用小声耳语的方式把这段话说出来。
+  vocal_edit:
+    name: 歌词编辑
+    needs_audio: true
+    needs_text: false
+    description: |
+      把歌唱录音里唱的某段歌词改成另一段词，旋律/音色/唱腔不变，需要输入语音。 Use for: 改歌里「唱的是什么词」（把歌词‘明天你好’改成‘未来你好’）；用户提到歌词/唱的/这首歌/演唱时选本类。 Do NOT use: 普通说话录音的文字内容（content_edit）；改音色（voice_edit）。 Example: 把这首歌里唱的‘明天你好’改成‘未来你好’ -> orig=明天你好, new=未来你好。
+    params:
+    - name: orig
+      type: string
+      required: true
+    - name: new
+      type: string
+      required: true
+    duration:
+      strategy: content_scaled
+    templates:
+      zh: 把这段歌词中的“{orig}”改成“{new}”。
+      en: Change "{orig}" to "{new}" in the vocal recording.
+  accent_edit:
+    name: 去口音
+    needs_audio: true
+    needs_text: false
+    description: |
+      去除方言口音、把发音标准化为普通话，说话人音色与内容不变，需要输入语音。 Use for: 去掉口音/去方言腔/转成标准普通话/发音标准化，且要求保留原说话人音色。 Do NOT use: 音色转换（voice_edit）；改说话内容。
+    duration:
+      strategy: equal_length
+    templates:
+      zh: 请去掉这段语音里的方言口音，保持说话人音色一致。
+# zh/en 是对应语种训练数据里真实出现过的事件名称候选，不是翻译词典。
+# NV 输出优先绑定 ASR 音频语言；若该 event 在该语种没有候选，则 event 名和整条 instruction 一起回退到另一语种。
+nonverbal_events:
+  breath:
+    desc: 常规呼吸声(自然的吸气/呼气声响)
+    zh: [呼吸声, 换气声, 喘气声]
+    en: [breath, breathing]
+  laugh:
+    desc: 明显的笑声(哈哈大笑)
+    zh: [笑声, 大笑声]
+    en: [laugh, laughter]
+  sigh:
+    desc: 叹气声(明显的长声叹息)
+    zh: [叹息声, 叹气声]
+    en: [sigh, sighing]
+  surprise-oh:
+    desc: 用"哦"表达的惊讶感叹
+    zh: ['"哦"的惊讶声']
+    en: []
+  throatclearing:
+    desc: 清嗓子的声音(轻咳般的清喉动作)
+    zh: [清嗓声, 清嗓子的声音]
+    en: [throat clearing, throat-clearing sound]
+  cough:
+    desc: 咳嗽声
+    zh: [咳嗽声]
+    en: [cough, coughing]
+  confirmation-en:
+    desc: 用"嗯"表示应答/确认(轻声肯定)
+    zh: ['"嗯"的应答声']
+    en: []
+  uhm:
+    desc: 语气词"呃/嗯"(思考停顿时的填充音)
+    zh: ['"呃"的语气词', '"嗯"的语气声']
+    en: []
+  surprise-ah:
+    desc: 用"啊"表达的惊讶感叹
+    zh: ['"啊"的惊讶声']
+    en: []
+  tsk:
+    desc: 咂舌声/"啧啧"(表达不以为然或思考)
+    zh: [咂舌声, 啧声]
+    en: []
+  sniff:
+    desc: 吸鼻涕/嗅鼻子的声音
+    zh: [吸鼻声, 抽鼻子的声音]
+    en: [sniff, sniffing]
+  pause:
+    desc: 明显的无声停顿
+    zh: [停顿]
+    en: []
+  surprise-wa:
+    desc: 用"哇"表达的惊讶感叹
+    zh: ['"哇"的惊讶声']
+    en: []
+  elongation:
+    desc: 元音拉长/拖音(词尾被拖长)
+    zh: [拉长音, 拖音]
+    en: []
+  question-ei:
+    desc: 用"诶?"表达的疑问语气
+    zh: ['"诶?"的疑问声']
+    en: []
+  crying:
+    desc: 哭声(啜泣或哭泣)
+    zh: [哭声, 啜泣声]
+    en: [crying, sobbing]
+  dissatisfaction-hnn:
+    desc: 用"哼"表达的不满
+    zh: ['"哼"的不满声']
+    en: []
+  gasp:
+    desc: 倒吸一口气(常表示震惊)
+    zh: [倒吸气声, 惊喘声]
+    en: [gasp, gasping]
+  question-ah:
+    desc: 用"啊?"表达的疑问语气
+    zh: ['"啊?"的疑问声']
+    en: []
+  smack:
+    desc: 咂嘴声(嘴巴张合的短促声响)
+    zh: [咂嘴声]
+    en: []
+  question-en:
+    desc: 用"嗯?"表达的疑问语气
+    zh: ['"嗯?"的疑问声']
+    en: []
+  surprise-yo:
+    desc: 用"哟"表达的惊讶感叹
+    zh: ['"哟"的惊讶声']
+    en: []
+  question-oh:
+    desc: 用"哦?"表达的疑问语气
+    zh: ['"哦?"的疑问声']
+    en: []
+  question-yi:
+    desc: 用"咦?"表达的疑问语气
+    zh: ['"咦?"的疑问声']
+    en: []
+  chuckle:
+    desc: 轻声笑/偷笑(比 laugh 更轻)
+    zh: [偷笑声, 轻笑声]
+    en: []
+  yawn:
+    desc: 打哈欠的声音
+    zh: [哈欠声]
+    en: [yawn, yawning]
+  sneeze:
+    desc: 打喷嚏声
+    zh: [喷嚏声]
+    en: [sneeze, sneezing]
+  shh:
+    desc: 嘘声(示意安静的"嘘")
+    zh: [嘘声]
+    en: []
+  pant:
+    desc: 喘息声(急促连续呼吸)
+    zh: [喘息声]
+    en: []
+  clap:
+    desc: 拍手声(短促/单次)
+    zh: [拍手声, 掌声]
+    en: []
+  moan:
+    desc: 呻吟声(低沉的持续声)
+    zh: [呻吟声]
+    en: [moan, moaning]
+  inhale:
+    desc: 明显的吸气声
+    zh: [吸气声]
+    en: []
+  applaud:
+    desc: 掌声(持续/多人鼓掌)
+    zh: [掌声, 鼓掌声]
+    en: []
+  hum:
+    desc: 哼唱/哼小调
+    zh: [哼唱声, 哼声]
+    en: []
+  hiss:
+    desc: 嘶声(嘶嘶的连续摩擦音)
+    zh: [嘶声]
+    en: []
+  exhale:
+    desc: 明显的呼气声
+    zh: [呼气声]
+    en: []
+  whistle:
+    desc: 口哨声
+    zh: [口哨声]
+    en: []
+  snore:
+    desc: 打呼噜/鼾声
+    zh: [打呼噜声, 鼾声]
+    en: [snore, snoring]
+  grunt:
+    desc: 低沉短促的哼哼声(用力或不悦)
+    zh: []
+    en: [grunt, grunting]
+template_pools:
+  editing:
+    speed_edit:
+      templates:
+        zh:
+        - 请将这段语音的语速{value}。
+        - 把语速{value}。
+        - 将音频的语速{value}。
+        - 帮我把这段话的语速{value}。
+        - 请把说话速度{value}。
+        - 将这段语音的语速{value}吧。
+        - 麻烦把语速{value}。
+        - 请将语速{value}一下。
+        - 把这段录音的语速{value}。
+        - 将音频语速{value}即可。
+        - 需要把语速{value}。
+        - 请帮我将这段语音的语速{value}。
+        - 把说话的速度{value}。
+        - 将这段话的语速{value}。
+        - 请把音频语速{value}。
+        - 把语速给我{value}。
+        - 将语速{value},谢谢。
+        - 请将该录音的语速{value}。
+        - 把这段语音语速{value}一下。
+        - 将播放语速{value}。
+        - 请把这段音频的语速{value}。
+        - 语速{value}。
+        - 帮忙把语速{value}。
+        - 将说话语速{value}。
+        - 请将这段录音语速{value}。
+        - 把音频的语速{value}吧。
+        - 将这段语音的播放速度{value}。
+        - 请把语速{value}就好。
+        - 把这段话语速{value}。
+        - 将语速{value}处理。
+        en:
+        - Please {value} for this speech.
+        - '{value_cap}.'
+        - Could you {value} for this audio?
+        - '{value_cap} for this speech.'
+        - Please {value} on this recording.
+        - I need you to {value}.
+        - '{value_cap} for this clip.'
+        - Kindly {value} for this voice.
+        - Please {value}, thanks.
+        - '{value_cap} on this audio.'
+        - Can you {value} for this speech?
+        - '{value_cap}, please.'
+        - Please {value} on the speech.
+        - Go ahead and {value}.
+        - '{value_cap} for this recording.'
+        - I'd like you to {value}.
+        - Please {value} for the audio clip.
+        - '{value_cap} on this clip.'
+        - Make sure to {value}.
+        - '{value_cap} here.'
+        - Please {value}.
+        - Help me {value} for this voice.
+        - '{value_cap} for the speech.'
+        - Could you please {value}?
+        - '{value_cap} on this recording.'
+        - Please {value} for this recording.
+        - '{value_cap} for this audio.'
+        - I want you to {value}.
+        - '{value_cap}, if you could.'
+        - Please {value} on this clip.
+      values:
+        0.50x:
+          zh: [放慢到0.5倍, 调慢至0.5倍速, 减速到原来的一半, 放慢至0.50x, 降到一半速度, 放缓到 0.5x]
+          en:
+          - slow down to 0.5x
+          - slow to half speed
+          - reduce the speed to 0.50x
+          - slow it down to half the original speed
+          - bring the speed down to 0.5x
+        0.75x:
+          zh: [放慢到0.75倍, 调慢至0.75倍速, 减速到0.75x, 放缓到原速的0.75倍, 降到 0.75x]
+          en: [slow down to 0.75x, slow to 0.75 times the speed, reduce the speed to 0.75x, ease the pace down to 0.75x]
+        1.25x:
+          zh: [加快到1.25倍, 提速到1.25倍速, 加速至1.25x, 加快到原速的1.25倍, 提到 1.25x]
+          en: [speed up to 1.25x, speed up to 1.25 times, increase the speed to 1.25x, bring the pace up to 1.25x]
+        1.50x:
+          zh: [加快到1.5倍, 提速到1.5倍速, 加速至1.50x, 加快到原速的一倍半, 提到 1.5x]
+          en:
+          - speed up to 1.5x
+          - speed up to 1.5 times
+          - increase the speed to 1.50x
+          - bring the pace up to one and a half times
+        2.00x:
+          zh: [加快到2倍, 提速到两倍速, 加速至2.00x, 加快到双倍速度, 提到 2x]
+          en: [speed up to 2x, double the speed, increase the speed to 2.00x, speed it up to twice as fast]
+    pitch_edit:
+      templates:
+        zh:
+        - 请将这段语音的音调{value}。
+        - 把音调{value}。
+        - 将音频的音高{value}。
+        - 帮我把这段话的音调{value}。
+        - 请把音高{value}。
+        - 将这段语音的音调{value}吧。
+        - 麻烦把音调{value}。
+        - 请将音高{value}一下。
+        - 把这段录音的音调{value}。
+        - 将音频音高{value}即可。
+        - 需要把音调{value}。
+        - 请帮我将这段语音的音高{value}。
+        - 把说话的音调{value}。
+        - 将这段话的音高{value}。
+        - 请把音频音调{value}。
+        - 把音高给我{value}。
+        - 将音调{value},谢谢。
+        - 请将该录音的音高{value}。
+        - 把这段语音音调{value}一下。
+        - 将嗓音的音高{value}。
+        - 请把这段音频的音调{value}。
+        - 音调{value}。
+        - 帮忙把音高{value}。
+        - 将说话音调{value}。
+        - 请将这段录音音高{value}。
+        - 把音频的音调{value}吧。
+        - 将这段语音的音高{value}。
+        - 请把音调{value}就好。
+        - 把这段话音高{value}。
+        - 将音高{value}处理。
+        en:
+        - Please {value} for this speech.
+        - '{value_cap}.'
+        - Could you {value} for this audio?
+        - '{value_cap} for this speech.'
+        - Please {value} on this recording.
+        - I need you to {value}.
+        - '{value_cap} for this clip.'
+        - Kindly {value} for this voice.
+        - Please {value}, thanks.
+        - '{value_cap} on this audio.'
+        - Can you {value} for this speech?
+        - '{value_cap}, please.'
+        - Please {value} on the speech.
+        - Go ahead and {value}.
+        - '{value_cap} for this recording.'
+        - I'd like you to {value}.
+        - Please {value} for the audio clip.
+        - '{value_cap} on this clip.'
+        - Make sure to {value}.
+        - '{value_cap} here.'
+        - Please {value}.
+        - Help me {value} for this voice.
+        - '{value_cap} for the speech.'
+        - Could you please {value}?
+        - '{value_cap} on this recording.'
+        - Please {value} for this recording.
+        - '{value_cap} for this audio.'
+        - I want you to {value}.
+        - '{value_cap}, if you could.'
+        - Please {value} on this clip.
+      values:
+        n03:
+          zh: [降低3个半音, 调低三个半音, 下调3个半音, 向下调整3个半音, 降 3 个半音, 降低 -3 semitones]
+          en:
+          - lower by 3 semitones
+          - drop the pitch by 3 semitones
+          - shift down 3 semitones
+          - go down by -3 semitones
+          - pitch down 3 half-steps
+        n02:
+          zh: [降低2个半音, 调低两个半音, 下调2个半音, 向下调整2个半音, 降 2 个半音]
+          en: [lower by 2 semitones, drop the pitch by 2 semitones, shift down 2 semitones, go down by -2 semitones]
+        n01:
+          zh: [降低1个半音, 调低一个半音, 下调1个半音, 向下调整1个半音, 降 1 个半音]
+          en: [lower by 1 semitone, drop the pitch by 1 semitone, shift down 1 semitone, go down by -1 semitone]
+        p01:
+          zh: [升高1个半音, 调高一个半音, 上调1个半音, 向上调整1个半音, 升 1 个半音]
+          en: [raise by 1 semitone, lift the pitch by 1 semitone, shift up 1 semitone, go up by +1 semitone]
+        p02:
+          zh: [升高2个半音, 调高两个半音, 上调2个半音, 向上调整2个半音, 升 2 个半音]
+          en: [raise by 2 semitones, lift the pitch by 2 semitones, shift up 2 semitones, go up by +2 semitones]
+        p03:
+          zh: [升高3个半音, 调高三个半音, 上调3个半音, 向上调整3个半音, 升 3 个半音, 升高 +3 semitones]
+          en:
+          - raise by 3 semitones
+          - lift the pitch by 3 semitones
+          - shift up 3 semitones
+          - go up by +3 semitones
+          - pitch up 3 half-steps
+    volume_edit:
+      templates:
+        zh:
+        - 请将这段语音的音量{value}。
+        - 把音量{value}。
+        - 将音频的音量{value}。
+        - 帮我把这段话的音量{value}。
+        - 请把音量{value}。
+        - 将这段语音的音量{value}吧。
+        - 麻烦把音量{value}。
+        - 请将音量{value}一下。
+        - 把这段录音的音量{value}。
+        - 将音频音量{value}即可。
+        - 需要把音量{value}。
+        - 请帮我将这段语音的音量{value}。
+        - 把说话的音量{value}。
+        - 将这段话的音量{value}。
+        - 请把音频音量{value}。
+        - 把音量给我{value}。
+        - 将音量{value},谢谢。
+        - 请将该录音的音量{value}。
+        - 把这段语音音量{value}一下。
+        - 将声音的响度{value}。
+        - 请把这段音频的音量{value}。
+        - 音量{value}。
+        - 帮忙把音量{value}。
+        - 将说话音量{value}。
+        - 请将这段录音音量{value}。
+        - 把音频的音量{value}吧。
+        - 将这段语音的响度{value}。
+        - 请把音量{value}就好。
+        - 把这段话音量{value}。
+        - 将音量{value}处理。
+        en:
+        - Please {value} for this speech.
+        - '{value_cap}.'
+        - Could you {value} for this audio?
+        - '{value_cap} for this speech.'
+        - Please {value} on this recording.
+        - I need you to {value}.
+        - '{value_cap} for this clip.'
+        - Kindly {value} for this voice.
+        - Please {value}, thanks.
+        - '{value_cap} on this audio.'
+        - Can you {value} for this speech?
+        - '{value_cap}, please.'
+        - Please {value} on the speech.
+        - Go ahead and {value}.
+        - '{value_cap} for this recording.'
+        - I'd like you to {value}.
+        - Please {value} for the audio clip.
+        - '{value_cap} on this clip.'
+        - Make sure to {value}.
+        - '{value_cap} here.'
+        - Please {value}.
+        - Help me {value} for this voice.
+        - '{value_cap} for the speech.'
+        - Could you please {value}?
+        - '{value_cap} on this recording.'
+        - Please {value} for this recording.
+        - '{value_cap} for this audio.'
+        - I want you to {value}.
+        - '{value_cap}, if you could.'
+        - Please {value} on this clip.
+      values:
+        m15dB:
+          zh: [降低15分贝, 调低15dB, 减小15分贝, 下调15分贝, 降低 15 dB, 减小 -15 dB]
+          en: [decrease by 15 dB, lower the volume by 15 dB, reduce by 15dB, turn down by 15 dB, drop by -15 dB]
+        m10dB:
+          zh: [降低10分贝, 调低10dB, 减小10分贝, 下调10分贝, 降低 10 dB]
+          en: [decrease by 10 dB, lower the volume by 10 dB, reduce by 10dB, turn down by 10 dB]
+        m05dB:
+          zh: [降低5分贝, 调低5dB, 减小5分贝, 下调5分贝, 降低 5 dB]
+          en: [decrease by 5 dB, lower the volume by 5 dB, reduce by 5dB, turn down by 5 dB]
+        p05dB:
+          zh: [升高5分贝, 调高5dB, 增大5分贝, 上调5分贝, 提高 5 dB]
+          en: [increase by 5 dB, raise the volume by 5 dB, boost by 5dB, turn up by 5 dB]
+        p10dB:
+          zh: [升高10分贝, 调高10dB, 增大10分贝, 上调10分贝, 提高 10 dB]
+          en: [increase by 10 dB, raise the volume by 10 dB, boost by 10dB, turn up by 10 dB]
+        p15dB:
+          zh: [升高15分贝, 调高15dB, 增大15分贝, 上调15分贝, 提高 15 dB, 增大 +15 dB]
+          en: [increase by 15 dB, raise the volume by 15 dB, boost by 15dB, turn up by 15 dB, lift by +15 dB]
+    emotion_edit:
+      templates:
+        zh:
+        - 将情感切换成{emo}。
+        - 把这段语音的情感转换为{emo}。
+        - 请将这段话的情感改成{emo}。
+        - 将说话情绪调整为{emo}。
+        - 用{emo}的情感重新表达这段话。
+        - 将情绪转变为{emo}。
+        - 请把语气改为{emo}。
+        - 让这段语音表现出{emo}的情绪。
+        - 把情感换成{emo}的感觉。
+        - 将这段音频重新演绎为{emo}的情感。
+        - 请用{emo}的语气说这段话。
+        - 把整段语音的情感调成{emo}。
+        - 将这句话的情绪替换为{emo}。
+        - 请将朗读的情感转为{emo}。
+        - 把说话的感情改成{emo}。
+        - 将语音情绪重新设定为{emo}。
+        - 请让这段话带上{emo}的情感。
+        - 把这段音频的情绪改造成{emo}。
+        - 将整体情感基调换成{emo}。
+        - 请以{emo}的情绪重新念这段话。
+        - 把这段语音改成{emo}的腔调。
+        - 将情感色彩调整为{emo}。
+        - 请把这段话演绎成{emo}的情感。
+        - 让说话语气切换到{emo}。
+        - 把这段录音的情感变为{emo}。
+        - 将这段话的感情基调改成{emo}。
+        - 请用{emo}的方式表达这段内容。
+        - 把语音的情绪风格改为{emo}。
+        - 将这段话重新演绎,情感设为{emo}。
+        - 请让整段音频呈现{emo}的情绪。
+        en:
+        - Switch the emotion to {emo}.
+        - Change the emotion of this speech to {emo}.
+        - Convert the emotional tone to {emo}.
+        - Re-express this sentence with a {emo} emotion.
+        - Adjust the speaking emotion to {emo}.
+        - Turn the emotion into {emo}.
+        - Change the mood to {emo}.
+        - Render this speech in a {emo} emotion.
+        - Transform the emotion to {emo}.
+        - Speak this line with a {emo} feeling.
+        - Make this speech sound {emo}.
+        - Shift the emotional tone to {emo}.
+        - Replace the emotion in this audio with {emo}.
+        - Read this sentence again in a {emo} mood.
+        - Set the emotional tone of this clip to {emo}.
+        - Re-voice this line so it feels {emo}.
+        - Give this speech a {emo} emotion.
+        - Recast the emotion of this audio as {emo}.
+        - Modify the speaking emotion to {emo}.
+        - Make the overall mood {emo}.
+        - Express this content with a {emo} tone.
+        - Change the affect of this voice to {emo}.
+        - Switch the emotional color of this speech to {emo}.
+        - Deliver this line with a {emo} emotion.
+        - Alter the mood of the audio to {emo}.
+        - Reinterpret this speech with a {emo} feeling.
+        - Let this clip carry a {emo} emotion.
+        - Turn the speaking style {emo}.
+        - Re-perform this line in a {emo} emotional tone.
+        - Make the whole audio convey a {emo} mood.
+      values:
+        happy:
+          zh: [开心]
+          en: [happy]
+        sad:
+          zh: [悲伤]
+          en: [sad]
+        angry:
+          zh: [愤怒]
+          en: [angry]
+        calm:
+          zh: [平静]
+          en: [calm]
+        fearful:
+          zh: [恐惧]
+          en: [fearful]
+        surprised:
+          zh: [惊讶]
+          en: [surprised]
+        excited:
+          zh: [兴奋]
+          en: [excited]
+        disgusted:
+          zh: [厌恶]
+          en: [disgusted]
+    nonverbal_edit:
+      templates:
+        zh:
+          delete:
+            anchor:
+            - 将"{anchor}"{side}的{nv}从语音中删除。
+            - 把出现在"{anchor}"{side}的{nv}去掉。
+            - 请删掉"{anchor}"{side}的那处{nv}。
+            - 移除语音里"{anchor}"{side}的{nv}。
+            - 去除"{anchor}"{side}出现的{nv}。
+            positional: ['将语音{pos}的{nv}删除。', '把{pos}的那处{nv}去掉。', '删掉出现在{pos}的{nv}。', '移除语音{pos}的{nv}。']
+            global: ['删除音频中所有的{nv}。', '去掉这段语音里的{nv}。', '移除音频里全部的{nv}。', '请把语音中的{nv}都删掉。', '清除这段音频中的{nv}。']
+          add:
+            anchor:
+            - 在"{anchor}"{side}增加{nv}。
+            - 请在"{anchor}"{side}加入一处{nv}。
+            - 于"{anchor}"{side}添加{nv}。
+            - 在语音中"{anchor}"{side}插入{nv}。
+            - 给"{anchor}"{side}补上{nv}。
+            positional: ['在语音{pos}增加{nv}。', '请在{pos}加入一处{nv}。', '于{pos}添加{nv}。', '在语音{pos}插入{nv}。']
+        en:
+          delete:
+            anchor:
+            - Remove the {nv} {side} "{anchor}" from the speech.
+            - Delete the {nv} that occurs {side} "{anchor}".
+            - Take out the {nv} {side} "{anchor}".
+            - Strip the {nv} {side} "{anchor}" out of the audio.
+            positional: ['Remove the {nv} at {pos} of the speech.', 'Delete the {nv} located at {pos}.', 'Take out the {nv}
+                at {pos}.']
+            global:
+            - Remove all the {nv} from the audio.
+            - Delete every {nv} in the speech.
+            - Strip all {nv} out of the audio.
+            - Take out all the {nv} from the speech.
+          add:
+            anchor:
+            - Add a {nv} {side} "{anchor}".
+            - Insert a {nv} {side} "{anchor}".
+            - Place a {nv} {side} "{anchor}" in the speech.
+            - Put a {nv} {side} "{anchor}".
+            positional: ['Add a {nv} at {pos} of the speech.', 'Insert a {nv} at {pos}.', 'Place a {nv} at {pos}.']
+    voice_edit:
+      templates:
+        zh:
+        - 请将这段音频的音色修改为符合以下描述的声音:"{desc}"。
+        - 保持说话内容不变,把音色转换成:"{desc}"。
+        - 将输入语音的音色改成这样的特征:"{desc}"。
+        - 把这段语音的嗓音替换为符合该描述的音色:"{desc}"。
+        - 请在不改变说话内容的前提下,将音色调整为:"{desc}"。
+        - 将该音频的音色编辑为:"{desc}"。
+        - 把说话人的音色修改成:"{desc}",内容保持不变。
+        - 请将音色转换为符合下述描述的声音:"{desc}"。
+        - 改变这段语音的音色,使其符合:"{desc}"。
+        - 请重新生成这段语音,音色需匹配:"{desc}"。
+        - 请把这段语音的音色编辑成:"{desc}",台词不变。
+        - 将这段录音的声线调整为:"{desc}"。
+        - 请转换说话人的声音特质,使其符合:"{desc}"。
+        - 在保留原内容的同时,把嗓音改成:"{desc}"。
+        - 请将该语音重新演绎为这样的音色:"{desc}"。
+        - 把这段话用如下音色重新说一遍:"{desc}"。
+        - 请调整音色,让它听起来像:"{desc}"。
+        - 将音频中的声音替换为符合此描述的音色:"{desc}"。
+        - 请把说话人的嗓音特征修改为:"{desc}"。
+        - 保持文字内容不变,将声音风格转为:"{desc}"。
+        - 请对这段语音做音色迁移,目标音色为:"{desc}"。
+        - 把这段语音的发声特质改造成:"{desc}"。
+        - 请将原音频的音色更换为:"{desc}",其余保持原样。
+        - 将说话声调整成符合以下特征的音色:"{desc}"。
+        - 请生成内容相同、但音色为如下描述的语音:"{desc}"。
+        - 把这条音频的声音换成:"{desc}"。
+        - 请将语音的音色风格改写为:"{desc}"。
+        - 在不修改台词的情况下,把音色变更为:"{desc}"。
+        - 请重新合成这段语音,使其音色符合:"{desc}"。
+        - 将这段语音的嗓音调成这样:"{desc}"。
+        en:
+        - 'Convert the voice in this audio to match the following description: "{desc}".'
+        - 'Keep the spoken content unchanged and change the timbre to: "{desc}".'
+        - 'Edit the voice of this speech to match: "{desc}".'
+        - 'Transform the speaker''s timbre into: "{desc}".'
+        - 'Please change the vocal timbre to fit this description: "{desc}".'
+        - 'Modify the audio so the voice matches: "{desc}".'
+        - 'Replace the speaker timbre with the one described as: "{desc}".'
+        - 'Without altering the content, adjust the timbre to: "{desc}".'
+        - 'Re-render this speech using a voice that matches: "{desc}".'
+        - 'Change the timbre of this audio to: "{desc}".'
+        - 'Recreate this speech with a voice described as: "{desc}".'
+        - 'Keep the words the same, but switch the voice to: "{desc}".'
+        - 'Apply a timbre transfer so the voice becomes: "{desc}".'
+        - 'Make the speaker sound like: "{desc}".'
+        - 'Adjust the vocal characteristics to match: "{desc}".'
+        - 'Render the same content with a voice matching: "{desc}".'
+        - 'Swap the speaker''s voice for one that fits: "{desc}".'
+        - 'Please reshape the timbre of this audio into: "{desc}".'
+        - 'Turn the voice in this clip into: "{desc}".'
+        - 'While preserving the script, change the timbre to: "{desc}".'
+        - 'Generate the same speech but with the voice: "{desc}".'
+        - 'Alter the speaking voice to match this description: "{desc}".'
+        - 'Re-voice this audio with a timbre described as: "{desc}".'
+        - 'Please edit the speaker timbre to: "{desc}".'
+        - 'Convert the speaking style of this audio to: "{desc}".'
+        - 'Give this speech a new voice that matches: "{desc}".'
+        - 'Change the vocal identity to fit: "{desc}".'
+        - 'Keep the content intact and morph the timbre into: "{desc}".'
+        - 'Synthesize this speech again with a timbre of: "{desc}".'
+        - 'Please convert the audio so the speaker sounds like: "{desc}".'
+    accent_edit:
+      templates:
+        zh:
+        - 请去掉这段语音里的方言口音,保持说话人音色一致。
+        - 把这段带口音的语音转成标准普通话,音色保持不变。
+        - 请消除音频里的方言口音,保留原说话人的音色。
+        - 将这段语音去掉口音,音色和内容都保持不变。
+        - 请把方言腔改成标准普通话发音,音色维持一致。
+        - 去除这段语音的方言口音,保持原来的音色。
+        - 把这段话的口音去掉,说话人音色照旧不变。
+        - 请输出标准普通话发音,并保持原音色不变。
+        - 将说话人的方言口音去掉,音色与原来一致。
+        - 请对这段音频去口音,同时保留原始音色。
+        - 把这段语音转成标准普通话,注意音色不要变。
+        - 消除地方口音、发音标准化,音色维持原样。
+        - 去掉这段语音的口音,音色和内容都要保持。
+        - 请换成普通话发音,保留说话人原本的音色。
+        - 请去掉这段语音里的方言口音,改成标准普通话。
+        - 把这段带口音的语音转换成标准的普通话。
+        - 请消除音频中的地方口音,输出标准普通话。
+        - 将这段方言口音的语音纠正为标准普通话。
+        - 请把这段话的口音去掉,用标准普通话说出来。
+        - 去除这段语音的方言腔,保持说话内容不变。
+        - 把这段话里的方言发音改成标准普通话发音。
+        - 请对这段音频做去口音处理,输出标准普通话。
+        - 将这段带地方口音的语音清理成纯正的普通话。
+        - 请去掉这段普通话里的方言味,让发音更标准。
+        - 把这段语音里的口音矫正成标准的普通话。
+        - 请去除这段语音的口音,保留原意和语气。
+        - 把这段带口音的中文语音转成无口音的普通话。
+        - 请去掉这段语音的方言口音,读成标准普通话。
+        - 将这段语音的发音标准化,去除方言口音。
+        - 请消除说话人的方言口音,统一为普通话发音。
+        en: []
+  restoration:
+    enhance_speech:
+      cleanup:
+        denoise:
+          zh: [请只去除这段音频中的背景噪声，保留说话人原有的房间混响以及其它音色，输出等长的去噪结果。, 请把这段语音里的噪声清理干净，但保留原有的混响和音效，让模型只做去噪。]
+          en:
+          - >-
+            Please remove only the background noise from this audio while preserving the original room reverberation and any
+            colorations. Output a denoised speech of the same length as the input.
+          - Please clean up the noise in this speech but keep the reverberation and effects untouched — denoise only.
+        dereverb:
+          zh: [请只去除这段音频中的房间混响，保留原有的背景噪声以及其它音色，输出等长的去混响结果。, 请对这段语音进行去混响，但保留噪声和音效，让模型只做去混响。]
+          en:
+          - >-
+            Please remove only the room reverberation from this audio while preserving the original background noise and other
+            colorations. Output a dereverberated speech of the same length as the input.
+          - Please dereverb this speech but keep the noise and effects untouched — dereverb only.
+        denoise_dereverb:
+          zh: [请对这段语音做纯净化处理，保留所有说话人的人声，并去除其中的噪声和混响，输出与输入等长的干净人声。, 请将这段音频恢复成纯净人声版本：保留原本所有说话人，同时完成去噪与去混响，输出等长的纯净语音。]
+          en:
+          - >-
+            Please clean up this input speech and keep all speakers intact, while removing the background noise and room reverberation.
+            Output the restored clean speech with the same length as the input.
+          - >-
+            Please turn this audio into a clean-speech-only version keeping all original speakers, and meanwhile denoise and
+            dereverb the audio, and keep the output length unchanged.
+      zh:
+      - 请对这段语音做纯净化处理，保留所有说话人的人声，并去除噪声、混响以及各种失真，输出与输入等长的干净人声。
+      - 请将这段音频恢复成纯净人声版本：保留原本所有说话人，并去除其中的噪声和混响，输出等长的纯净语音。
+      - 请清理这段输入语音，不做说话人删除，并去除房间混响，输出干净的人声结果。
+      en:
+      - >-
+        Please clean up this input speech and keep all speakers intact, while removing the background noise and room reverberation.
+        Output the restored clean speech with the same length as the input.
+      - >-
+        Please clean up this input speech and keep all speakers intact, while removing the background noise, room reverberation,
+        and various distortions. Output the restored clean speech with the same length as the input.
+      - >-
+        Please turn this audio into a clean-speech-only version keeping all original speakers, and meanwhile denoise and dereverb
+        the audio, and keep the output length unchanged.
+    separate_speech:
+      by_content:
+        cleanup:
+          denoise:
+            zh:
+            - 请在这段输入语音中保留说“{text}”的那位说话人，去掉其他说话人并对音频去噪，输出单条纯净人声。
+            - 请提取说“{text}”的那个人，只保留这个人的声音，同时消除其他说话人的声音并去噪，输出与输入等长的单人纯净语音。
+            en:
+            - >-
+              Please extract the speaker who says "{text}" and keep only this person's voice; remove all other speakers, and
+              meanwhile denoise the audio, producing a single-speaker clean speech of the same length as the input.
+            - >-
+              Please keep only the speaker who says "{text}" in this input speech, remove the other speakers, and meanwhile
+              denoise the audio, and output a single clean speech track.
+          dereverb:
+            zh:
+            - 请在这段输入语音中保留说“{text}”的那位说话人，去掉其他说话人并去除房间混响，输出单条纯净人声。
+            - 请提取说“{text}”的那个人，只保留这个人的声音，同时消除其他说话人的声音并完成去混响，输出与输入等长的单人纯净语音。
+            en:
+            - >-
+              Please extract the speaker who says "{text}" and keep only this person's voice; remove all other speakers and
+              the room reverberation, producing a single-speaker clean speech of the same length as the input.
+            - >-
+              Please keep only the speaker who says "{text}" in this input speech, remove the other speakers, and meanwhile
+              dereverb the audio, outputting a single clean speech track.
+          denoise_dereverb:
+            zh:
+            - 请在这段输入语音中保留说“{text}”的那位说话人，去掉其他说话人，并去除其中的噪声和混响，输出单条纯净人声。
+            - 请提取说“{text}”的那个人，只保留这个人的声音，同时消除其他说话人的声音，并完成去噪与去混响，输出与输入等长的单人纯净语音。
+            en:
+            - >-
+              Please keep only the speaker who says "{text}" in this input speech, remove the other speakers, while removing
+              the background noise and room reverberation, and output a single clean speech track.
+            - >-
+              Please extract the speaker who says "{text}" and keep only this person's voice; remove all other speakers, denoise
+              and dereverb the audio, and produce a single-speaker clean speech of the same length as the input.
+        zh:
+        - 请在这段输入语音中保留说“{text}”的那位说话人，去掉其他说话人并对音频去噪，输出单条纯净人声。
+        - 请提取说“{text}”的那个人，只保留这个人的声音，同时消除其他说话人的声音并去噪，输出与输入等长的单人纯净语音。
+        - 这段音频里有多位说话人，请找出说“{text}”的那位，仅输出该说话人的干净语音，其余说话人也要去掉。
+        en:
+        - >-
+          Please extract the speaker who says "{text}" and keep only this person's voice; remove all other speakers, and meanwhile
+          denoise the audio, producing a single-speaker clean speech of the same length as the input.
+        - >-
+          Please keep only the speaker who says "{text}" in this input speech, remove the other speakers, and meanwhile denoise
+          the audio, and output a single clean speech track.
+        - >-
+          This audio contains multiple speakers. Please locate the speaker who says "{text}" and output only this speaker's
+          clean voice; the other speakers should be removed as well, and meanwhile denoise the audio.
+        - >-
+          This audio contains multiple speakers. Please locate the speaker who says "{text}" and output only this speaker's
+          clean voice; the other speakers should be removed as well.
+        - Please keep only the speaker who says "{text}" in this input speech, remove the other speakers, and output a single
+          clean speech track.
+      by_order:
+        cleanup:
+          denoise:
+            zh: ['请保留第{n_zh}个开始说话的人，去掉其他说话人，并去除其中的背景噪声，输出单条纯净人声。', '请提取这段输入语音中第{n_zh}个开始说话的人，只保留这个人的声音，同时完成去噪，其他人声全部去除。']
+            en:
+            - Please keep the {n_ord} speaker to start talking and remove the other speakers, while removing the background
+              noise, outputting a single clean speech track.
+            - Please extract the {n_ord} speaker to start talking from this input speech, keep only this person's voice, and
+              denoise the audio; remove all other speakers.
+          dereverb:
+            zh: ['请保留第{n_zh}个开始说话的人，去掉其他说话人，并去除房间混响，输出单条纯净人声。', '请提取这段输入语音中第{n_zh}个开始说话的人，只保留这个人的声音，同时完成去混响，其他人声全部去除。']
+            en:
+            - Please keep the {n_ord} speaker to start talking and remove the other speakers, while removing the room reverberation,
+              outputting a single clean speech track.
+            - Please extract the {n_ord} speaker to start talking from this input speech, keep only this person's voice, and
+              dereverb the audio; remove all other speakers.
+          denoise_dereverb:
+            zh: ['请保留第{n_zh}个开始说话的人，去掉其他说话人，并去除其中的噪声和混响，输出单条纯净人声。', '请提取这段输入语音中第{n_zh}个开始说话的人，只保留这个人的声音，同时完成去噪与去混响，其他人声全部去除。']
+            en:
+            - >-
+              Please keep the {n_ord} speaker to start talking and remove the other speakers, while removing the background
+              noise and room reverberation, outputting a single clean speech track.
+            - >-
+              Please extract the {n_ord} speaker to start talking from this input speech, keep only this person's voice, and
+              denoise and dereverb the audio; remove all other speakers.
+        zh:
+        - 请保留第{n_zh}个开始说话的人，去掉其他说话人，输出单条纯净人声。
+        - 请提取这段输入语音中第{n_zh}个开始说话的人，只保留这个人的声音，其他人声全部去除。
+        - 这段音频中只保留第{n_zh}个开始说话的人对应的语音，去掉其余说话人。
+        en:
+        - Please keep the {n_ord} speaker to start talking and remove the other speakers, outputting a single clean speech
+          track.
+        - Please extract the {n_ord} speaker to start talking from this input speech and keep only this person's voice; remove
+          all other speakers.
+        - In this audio, please keep only the speech of the {n_ord} speaker and drop the rest of the speakers.
+    extract_vocals:
+      singing_only:
+        zh:
+        - 请只保留歌声，歌声本身，其余声音都去掉。
+        - 把唱歌的人声单独抽出，其它声音一概不要。
+        - 保留干净的歌声人声，其余全部去掉。
+        - 只要歌声片段，其它声音都移除。
+        - 请分离出歌声，其余的全部丢弃。
+        - 只输出主唱的歌声，其它内容都不要。
+        - 请把歌声单独保留，其余声音都去除。
+        - 只保留歌声本身，其它一切都移除。
+        en:
+        - Keep only the singing voice, drop everything else.
+        - Isolate the singing voice, remove the rest.
+        - Keep the clean singing voice, drop all other audio.
+        - Give me only the unaccompanied singing voice, discard the rest.
+        - Separate the singing voice and discard everything else.
+        - Output the lead singing voice only, drop the rest.
+        - Keep just the singing voice, strip everything else.
+        - Return the bare singing-voice track only, nothing else.
+      all_human_voices:
+        zh:
+        - 请保留所有人声，说话和歌唱都算，其余声音都去掉。
+        - 把所有人发出的声音，说话与唱歌，都留下，其它一概不要。
+        - 请提取所有人声，包含说话与歌唱，其余去除。
+        - 保留对白与歌声，都属于人声，其它声音都丢掉。
+        - 请把所有人声都留下，不论是说还是唱；其它都去掉。
+        - 保留全部人声，包括歌唱与说话，其它声音去除。
+        - 只保留人声内容，说话、唱歌，其余声音全都不要。
+        - 请保留人声，包括歌唱在内，其它声音全部移除。
+        en:
+        - Keep all human voices, speech and singing alike, drop everything else.
+        - Preserve speech and singing, both count as human voice, remove the rest.
+        - Output all voices, talking and singing, drop the rest.
+        - Extract human voices, speech plus singing, discard everything else.
+        - Keep dialogue and singing, drop all other sounds.
+        - Retain every human voice, whether speaking or singing, remove the rest.
+        - Keep all human voices, singing included, drop everything else.
+        - Preserve all human voices, including singing, discard the rest.
+    improve_quality:
+      bandwidth_extension:
+        cleanup:
+          denoise:
+            zh: [请对这段语音做超分辨率/带宽扩展处理，恢复被削掉的高频成分，同时完成去噪，输出宽带纯净人声。]
+            en:
+            - >-
+              Please perform bandwidth extension on this speech to recover the missing high-frequency content, while removing
+              the background noise, outputting a wideband clean speech.
+            - This audio suffers from limited bandwidth. Please restore it to a wideband, clear-sounding speech, and meanwhile
+              denoise the audio.
+          dereverb:
+            zh: [请对这段语音做超分辨率/带宽扩展处理，恢复被削掉的高频成分，同时完成去混响，输出宽带纯净人声。, 这段音频存在带宽受限的问题，请将其恢复成宽带清晰的人声，并去除房间混响。]
+            en:
+            - >-
+              Please perform bandwidth extension on this speech to recover the missing high-frequency content, while removing
+              the room reverberation, outputting a wideband clean speech.
+            - This audio suffers from limited bandwidth. Please restore it to a wideband, clear-sounding speech, and meanwhile
+              dereverb the audio.
+          denoise_dereverb:
+            zh: [请对这段语音做超分辨率/带宽扩展处理，恢复被削掉的高频成分，同时完成去噪与去混响，输出宽带纯净人声。, 这段音频存在带宽受限的问题，请将其恢复成宽带清晰的人声，并去除其中的噪声和混响。]
+            en:
+            - >-
+              Please perform bandwidth extension on this speech to recover the missing high-frequency content, while removing
+              the background noise and room reverberation, outputting a wideband clean speech.
+            - This audio suffers from limited bandwidth. Please restore it to a wideband, clear-sounding speech, and meanwhile
+              denoise and dereverb the audio.
+        zh:
+        - 这段音频存在带宽受限的问题，请将其恢复成宽带清晰的人声。
+        - 请对这段语音做超分辨率/带宽扩展处理，恢复被削掉的高频成分，输出宽带纯净人声。
+        - 请对这段语音做超分辨率/带宽扩展处理，恢复被削掉的高频成分，同时完成去噪与去混响，输出宽带纯净人声。
+        en:
+        - This audio suffers from limited bandwidth. Please restore it to a wideband, clear-sounding speech.
+        - This audio suffers from limited bandwidth. Please restore it to a wideband, clear-sounding speech, and meanwhile
+          denoise the audio.
+        - Please perform bandwidth extension on this speech to recover the missing high-frequency content, outputting a wideband
+          clean speech.
+      remove_effect:
+        telephone:
+          cleanup:
+            denoise:
+              zh: [请消除这段音频的电话带宽感，同时完成去噪，输出正常带宽的干净人声。]
+              en:
+              - Please remove the telephone-band coloration from this audio while removing the background noise, and output
+                a normally-bandwidthed clean voice.
+            dereverb:
+              zh: [请消除这段音频的电话带宽感，并去除房间混响，输出正常带宽的干净人声。]
+              en:
+              - Please remove the telephone-band coloration and room reverberation from this audio, and output a normally-bandwidthed
+                clean voice.
+            denoise_dereverb:
+              zh: [请消除这段音频的电话带宽感，并去除其中的噪声和混响，输出正常带宽的干净人声。]
+              en:
+              - >-
+                Please remove the telephone-band coloration from this audio while removing the background noise and room reverberation,
+                and output a normally-bandwidthed clean voice.
+          zh: [这段语音带有电话带宽的音色，请恢复成自然的宽带人声。, 请消除这段音频的电话带宽感，输出正常带宽的干净人声。]
+          en:
+          - This speech carries telephone-band coloration. Please restore it to a natural wideband voice.
+          - Please remove the telephone-band coloration from this audio and output a normally-bandwidthed clean voice.
+        megaphone:
+          cleanup:
+            denoise:
+              zh: [请消除这段音频的扩音器音色，同时完成去噪，输出自然清晰的人声。]
+              en:
+              - Please remove the megaphone coloration from this audio while removing the background noise, and output a natural,
+                clear voice.
+            dereverb:
+              zh: [请消除这段音频的扩音器音色，并去除房间混响，输出自然清晰的人声。]
+              en:
+              - Please remove the megaphone coloration and room reverberation from this audio, and output a natural, clear
+                voice.
+            denoise_dereverb:
+              zh: [请消除这段音频的扩音器音色，并去除其中的噪声和混响，输出自然清晰的人声。]
+              en:
+              - Please remove the megaphone coloration from this audio while removing the background noise and room reverberation,
+                and output a natural, clear voice.
+          zh: [这段音频带有扩音器音色，请恢复成自然的人声。, 请消除这段音频的扩音器音色，输出自然清晰的人声。]
+          en:
+          - This audio has a megaphone-like coloration. Please restore it to a natural-sounding voice.
+          - Please remove the megaphone coloration from this audio and output a natural, clear voice.
+        underwater:
+          cleanup:
+            denoise:
+              zh: [请消除这段音频的水下闷声效果，同时完成去噪，输出清晰的宽带人声。]
+              en:
+              - Please remove the underwater / muffled coloration and background noise from this audio, outputting a clear
+                wideband voice.
+            dereverb:
+              zh: [请消除这段音频的水下闷声效果，并去除房间混响，输出清晰的宽带人声。]
+              en:
+              - Please remove the underwater / muffled coloration and room reverberation from this audio, outputting a clear
+                wideband voice.
+            denoise_dereverb:
+              zh: [请消除这段音频的水下闷声效果，并去除其中的噪声和混响，输出清晰的宽带人声。]
+              en:
+              - >-
+                Please remove the underwater / muffled coloration from this audio while removing the background noise and
+                room reverberation, outputting a clear wideband voice.
+          zh: [这段音频听起来像水下/闷声效果，请恢复成正常清晰的人声。, 请消除这段音频的水下闷声效果，输出清晰的宽带人声。]
+          en:
+          - This audio sounds underwater / muffled. Please restore it to a normal, clear-sounding voice.
+          - Please remove the underwater / muffled coloration in this audio, outputting a clear wideband voice.
+        clipping:
+          cleanup:
+            denoise:
+              zh: [请对这段音频做去破音处理，修复被硬削掉的波形，同时完成去噪，输出干净完整的人声。]
+              en:
+              - Please repair the hard-clipped waveform in this speech while removing the background noise, producing a clean
+                and intact voice.
+            dereverb:
+              zh: [请对这段音频做去破音处理，修复被硬削掉的波形，并去除房间混响，输出干净完整的人声。]
+              en:
+              - Please repair the hard-clipped waveform in this speech while removing the room reverberation, producing a
+                clean and intact voice.
+            denoise_dereverb:
+              zh: [请对这段音频做去破音处理，修复被硬削掉的波形，并去除其中的噪声和混响，输出干净完整的人声。]
+              en:
+              - Please repair the hard-clipped waveform in this speech while removing the background noise and room reverberation,
+                producing a clean and intact voice.
+          zh: [这段语音存在破音削波问题，请把削波恢复成正常的人声波形。, 请对这段音频做去破音处理，修复被硬削掉的波形，输出干净完整的人声。]
+          en:
+          - This audio is clipped. Please declip it and restore the speech to a natural-looking waveform.
+          - Please repair the hard-clipped waveform in this speech, producing a clean and intact voice.
+        dropout:
+          cleanup:
+            denoise:
+              zh: [请修复这段语音中的丢包脱落问题，同时完成去噪，输出连续自然的人声。]
+              en:
+              - Please repair the packet-dropout artifacts in this speech while removing the background noise, and output
+                a continuous, natural voice.
+            dereverb:
+              zh: [请修复这段语音中的丢包脱落问题，并去除房间混响，输出连续自然的人声。]
+              en:
+              - Please repair the packet-dropout artifacts in this speech while removing the room reverberation, and output
+                a continuous, natural voice.
+            denoise_dereverb:
+              zh: [请修复这段语音中的丢包脱落问题，并去除其中的噪声和混响，输出连续自然的人声。]
+              en:
+              - Please repair the packet-dropout artifacts in this speech while removing the background noise and room reverberation,
+                and output a continuous, natural voice.
+          zh: [这段音频存在明显的丢包或瞬断，请把缺失的片段补全，输出连续完整的人声。, 请修复这段语音中的丢包脱落问题，输出连续自然的人声。]
+          en:
+          - This audio has audible packet dropouts or short cut-offs. Please fill in the missing segments, outputting a continuous,
+            intact voice.
+          - Please repair the packet-dropout artifacts in this speech and output a continuous, natural voice.
+        dc_offset:
+          cleanup:
+            denoise:
+              zh: [这段音频存在直流偏置，请把直流成分去掉，同时完成去噪，输出居中的干净人声。]
+              en:
+              - This audio has a DC offset. Please remove the DC component and background noise, and output a properly-centered
+                clean voice.
+            dereverb:
+              zh: [这段音频存在直流偏置，请把直流成分去掉，并去除房间混响，输出居中的干净人声。]
+              en:
+              - This audio has a DC offset. Please remove the DC component and room reverberation, and output a properly-centered
+                clean voice.
+            denoise_dereverb:
+              zh: [这段音频存在直流偏置，请把直流成分去掉，并去除其中的噪声和混响，输出居中的干净人声。]
+              en:
+              - This audio has a DC offset. Please remove the DC component, background noise, and room reverberation, and
+                output a properly-centered clean voice.
+          zh: [这段音频存在直流偏置，请把直流成分去掉，输出居中的干净人声。]
+          en: [This audio has a DC offset. Please remove the DC component and output a properly-centered clean voice.]
+        _generic:
+          zh: [请对这段音频做音质修复，去除录音设备/音色带来的失真，恢复成自然清晰的宽带人声。, 请消除这段音频的音色失真，恢复成自然、清晰的人声。]
+          en:
+          - Please restore the audio quality by removing the recording/coloration artifacts, and output a natural, clear-sounding
+            wideband voice.
+          - Please remove the timbral distortion in this audio and restore it to a natural, clear voice.
