@@ -21,22 +21,25 @@
 
 ## Contents
 
-- [News](#news)
-- [Introduction](#introduction)
-- [Supported Tasks](#supported-tasks)
-- [Model Architecture](#model-architecture)
-- [Quick Start](#quick-start)
-  - [Installation](#installation)
-    - [uv](#uv)
-    - [Conda](#conda)
-  - [Download the weights](#download-the-weights)
-  - [Command-line inference](#command-line-inference)
-  - [Interactive Gradio demo](#interactive-gradio-demo)
-  - [Python API](#python-api)
-- [Fine-tuning](#fine-tuning)
-- [Contributing](#contributing)
-- [Citation](#citation)
-- [License](#license)
+- [AuK: An Open-Source Foundational Model for Speech Generation and Editing](#auk-an-open-source-foundational-model-for-speech-generation-and-editing)
+  - [News](#news)
+  - [Contents](#contents)
+  - [Introduction](#introduction)
+  - [Model Architecture](#model-architecture)
+  - [Supported Tasks](#supported-tasks)
+  - [Quick Start](#quick-start)
+    - [Installation](#installation)
+      - [uv](#uv)
+      - [Conda](#conda)
+    - [Download the weights](#download-the-weights)
+    - [Command-line inference](#command-line-inference)
+    - [Interactive Gradio demo](#interactive-gradio-demo)
+    - [Prompt Enhancer](#prompt-enhancer)
+    - [Python API](#python-api)
+  - [Fine-tuning](#fine-tuning)
+  - [Contributing](#contributing)
+  - [Citation](#citation)
+  - [License](#license)
 
 ## Introduction
 
@@ -258,6 +261,12 @@ The model checkpoint contains the diffusion transformer and layer-fusion weights
 ### Command-line inference
 All tasks use the same message-based interface. An `--instruction` is always required, while source or reference `--audio` is optional depending on the task. The examples below are just a taste — for the full instruction templates and per-task CLI examples, see the [Cookbook](docs/COOKBOOK.md).
 
+> [!TIP]
+> When starting from a free-form request, we recommend using
+> [Prompt Enhancer](#prompt-enhancer). It prepares the model instruction, target
+> duration, and any required audio preprocessing, then prints a ready-to-run
+> one-line `auk-infer` command.
+
 **Content editing**
 
 Rewrite what is *said* by describing the change in the instruction:
@@ -416,6 +425,35 @@ Other examples:
 auk-gradio --share
 auk-gradio --port 8000
 ```
+
+### Prompt Enhancer
+
+PE uses the same OpenAI-compatible LLM environment variables described above.
+Load them from `.env`, then run:
+
+```bash
+set -a
+source ./.env
+set +a
+
+python src/auk/infer/pe.py \
+  --audio assets/demo-input-audio/whisper/wh-w2n-zh-input.wav \
+  --instruction "Convert this whisper into normal speech while preserving the speaker and content." \
+  --asr auto
+```
+
+PE prints the generated command:
+
+```bash
+auk-infer \
+  --audio assets/after_pe/wh-w2n-zh-input.wav \
+  --instruction 'Convert this whispered speech into normal speech.' \
+  --output assets/after_pe/wh-w2n-zh-input.output.wav \
+  --gen_seconds 8.58
+```
+
+The terminal also shows the detected task and target duration, and writes a
+compact JSON manifest under `assets/after_pe/`.
 
 ### Python API
 

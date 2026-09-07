@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import base64
 import hashlib
 import io
@@ -8,6 +9,8 @@ import math
 import os
 import random
 import re
+import shlex
+import shutil
 import tempfile
 import threading
 import time
@@ -39,6 +42,7 @@ _DURATION_CONFIG = _RUNTIME["duration"]
 _F5_CONFIG = _DURATION_CONFIG["f5"]
 _VAD_CONFIG = _RUNTIME["vad"]
 _WHISPER_CONFIG = _RUNTIME["whisper"]
+_DEFAULT_CLI_OUTPUT_DIR = Path("assets") / "after_pe"
 
 LLM_MAX_TOKENS = int(_LLM_CONFIG["max_tokens"])
 LLM_TEMPERATURE = float(_LLM_CONFIG["temperature"])
@@ -1317,6 +1321,214 @@ def prepare_generation(
     return PromptEnhancer(**enhancer_kwargs).prepare(instruction, audio_path)
 
 
+def _build_cli_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Convert a natural-language request into AuK command-line inference inputs.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--instruction", required=True, help="original natural-language request")
+    parser.add_argument("--audio", default=None, help="source/reference audio; omit for Instruct TTS")
+    parser.add_argument(
+        "--target-duration",
+        type=float,
+        default=None,
+        help="override the PE-predicted target duration in seconds",
+    )
+    parser.add_argument(
+        "--asr",
+        choices=("auto", "cloud", "local"),
+        default="auto",
+        help="ASR provider: cloud then local fallback, Tencent Cloud only, or local SenseVoice only",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=_DEFAULT_CLI_OUTPUT_DIR,
+        help="directory for the PE manifest and any processed model-input audio",
+    )
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=None,
+        help="manifest JSON path; defaults to OUTPUT_DIR/<audio-stem>.pe.json",
+    )
+    return parser
+
+
+def _cli_asr_provider(mode: str) -> ASRProvider | None:
+    if mode == "auto":
+        return None
+    if mode == "local":
+        return SenseVoiceSmallASR()
+
+    secret_id = str(os.environ.get("TENCENTCLOUD_SECRET_ID") or os.environ.get("SecretId") or "").strip()
+    secret_key = str(os.environ.get("TENCENTCLOUD_SECRET_KEY") or os.environ.get("SecretKey") or "").strip()
+    missing = [
+        name
+        for name, value in (
+            ("TENCENTCLOUD_SECRET_ID", secret_id),
+            ("TENCENTCLOUD_SECRET_KEY", secret_key),
+        )
+        if not value
+    ]
+    if missing:
+        raise ValueError(f"--asr cloud 缺少腾讯云 ASR 配置: {missing}")
+    return TencentCloudRecordingASR(
+        secret_id=secret_id,
+        secret_key=secret_key,
+        engine_model_type=str(os.environ.get("ASR_ENGINE_MODEL_TYPE") or ASR_ENGINE_MODEL_TYPE).strip(),
+    )
+
+
+def _paths_refer_to_same_file(left: str | Path, right: str | Path) -> bool:
+    try:
+        return Path(left).resolve() == Path(right).resolve()
+    except OSError:
+        return os.path.abspath(os.fspath(left)) == os.path.abspath(os.fspath(right))
+
+
+def _display_path(path: str | Path) -> str:
+    resolved = Path(path).expanduser().resolve()
+    try:
+        return os.fspath(resolved.relative_to(Path.cwd().resolve()))
+    except ValueError:
+        return os.fspath(resolved)
+
+
+def _persist_cli_audio(
+    prepared_audio: str | None,
+    original_audio: str | None,
+    output_dir: Path,
+) -> tuple[str | None, bool]:
+    if not prepared_audio:
+        return None, False
+    if original_audio and _paths_refer_to_same_file(prepared_audio, original_audio):
+        return _display_path(original_audio), False
+
+    source = Path(prepared_audio)
+    original_name = Path(original_audio).name if original_audio else source.name
+    output_name = original_name if Path(original_name).suffix.lower() == ".wav" else f"{Path(original_name).stem}.wav"
+    output_path = output_dir / output_name
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, output_path)
+    return _display_path(output_path), True
+
+
+def _default_manifest_path(output_dir: Path, audio_path: str | None) -> Path:
+    stem = Path(audio_path).stem if audio_path else "instruct_tts"
+    return output_dir / f"{stem}.pe.json"
+
+
+def _build_inference_command_args(
+    model_inputs: dict[str, Any],
+    output_dir: Path,
+    audio_path: str | None,
+) -> list[str]:
+    stem = Path(audio_path).stem if audio_path else "instruct_tts"
+    command = ["auk-infer"]
+    if model_inputs["audio"]:
+        command.extend(("--audio", str(model_inputs["audio"])))
+    command.extend(
+        (
+            "--instruction",
+            str(model_inputs["instruction"]),
+            "--output",
+            _display_path(output_dir / f"{stem}.output.wav"),
+            "--gen_seconds",
+            str(model_inputs["gen_seconds"]),
+        )
+    )
+    return command
+
+
+def _build_inference_command(model_inputs: dict[str, Any], output_dir: Path, audio_path: str | None) -> str:
+    return shlex.join(_build_inference_command_args(model_inputs, output_dir, audio_path))
+
+
+def _format_inference_command(model_inputs: dict[str, Any], output_dir: Path, audio_path: str | None) -> str:
+    command = _build_inference_command_args(model_inputs, output_dir, audio_path)
+    lines = [command[0]]
+    lines.extend(f"{shlex.quote(command[index])} {shlex.quote(command[index + 1])}" for index in range(1, len(command), 2))
+    return " \\\n  ".join(lines)
+
+
+def _write_cli_outputs(
+    prepared: PromptEnhancerOutput,
+    *,
+    original_instruction: str,
+    original_audio: str | None,
+    output_dir: Path,
+    manifest_path: Path | None,
+) -> tuple[dict[str, Any], Path]:
+    model_audio, audio_was_processed = _persist_cli_audio(prepared.audio, original_audio, output_dir)
+    model_inputs = {
+        "instruction": prepared.instruction,
+        "audio": model_audio,
+        "gen_seconds": prepared.gen_seconds,
+    }
+    inference_command = _build_inference_command(model_inputs, output_dir, original_audio)
+    manifest = {
+        "schema_version": 1,
+        "original": {
+            "instruction": original_instruction,
+            "audio": _display_path(original_audio) if original_audio else None,
+        },
+        "model_inputs": model_inputs,
+        "task": {
+            "type": prepared.task_type,
+            "subtype": prepared.operation_subtype,
+            "duration_source": prepared.duration_source,
+        },
+        "audio_was_processed": audio_was_processed,
+        "inference_command": inference_command,
+    }
+
+    resolved_manifest_path = manifest_path or _default_manifest_path(output_dir, original_audio)
+    resolved_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return manifest, resolved_manifest_path
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_cli_parser().parse_args(argv)
+    prepared = None
+    try:
+        enhancer = PromptEnhancer(asr_provider=_cli_asr_provider(args.asr) if args.audio else None)
+        prepared = enhancer.prepare(
+            args.instruction,
+            args.audio,
+            target_duration=args.target_duration,
+        )
+        manifest, manifest_path = _write_cli_outputs(
+            prepared,
+            original_instruction=args.instruction,
+            original_audio=args.audio,
+            output_dir=args.output_dir,
+            manifest_path=args.manifest,
+        )
+    except (PromptEnhancerError, ValueError, FileNotFoundError, OSError) as exc:
+        raise SystemExit(f"Prompt Enhancer failed: {type(exc).__name__}: {exc}") from None
+    finally:
+        if prepared is not None:
+            prepared.cleanup()
+
+    task = manifest["task"]["type"]
+    if manifest["task"]["subtype"]:
+        task += f" / {manifest['task']['subtype']}"
+    print(f"Task: {task}")
+    print(f"Original instruction: {manifest['original']['instruction']}")
+    print(f"PE instruction: {manifest['model_inputs']['instruction']}")
+    print(f"Target duration: {manifest['model_inputs']['gen_seconds']:.2f} s")
+    print(f"Model input audio: {manifest['model_inputs']['audio'] or '(none)'}")
+    print(f"Manifest: {_display_path(manifest_path)}")
+    print("Inference command:")
+    print(_format_inference_command(manifest["model_inputs"], args.output_dir, args.audio))
+    return 0
+
+
 def _extract_json(text: str) -> dict[str, Any]:
     stripped = str(text or "").strip()
     if stripped.startswith("```"):
@@ -1834,3 +2046,7 @@ def _normalize_audio_level(
         return path
     except Exception:
         return audio_path
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

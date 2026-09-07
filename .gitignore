@@ -9,6 +9,7 @@ ckpts/*
 agent_space/
 gradio/
 eval/
+assets/after_pe/
 # Python
 __pycache__/
 *.py[cod]
