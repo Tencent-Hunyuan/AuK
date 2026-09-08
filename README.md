@@ -34,6 +34,7 @@
     - [Download the weights](#download-the-weights)
     - [Command-line inference](#command-line-inference)
     - [Interactive Gradio demo](#interactive-gradio-demo)
+    - [ComfyUI](#comfyui)
     - [Prompt Enhancer](#prompt-enhancer)
     - [Python API](#python-api)
   - [Fine-tuning](#fine-tuning)
@@ -184,6 +185,9 @@ uv pip install -e .
 # Core inference + Gradio + Prompt Enhancer + ASR
 uv pip install -e ".[gradio]"
 
+# Core inference + ComfyUI nodes + Prompt Enhancer + ASR
+uv pip install -e ".[comfyui]"
+
 # Core inference + fine-tuning
 uv pip install -e ".[train]"
 
@@ -203,6 +207,9 @@ pip install -e .
 
 # Core inference + Gradio + Prompt Enhancer + ASR
 pip install -e ".[gradio]"
+
+# Core inference + ComfyUI nodes + Prompt Enhancer + ASR
+pip install -e ".[comfyui]"
 
 # Core inference + fine-tuning
 pip install -e ".[train]"
@@ -425,6 +432,19 @@ Other examples:
 auk-gradio --share
 auk-gradio --port 8000
 ```
+
+### ComfyUI
+
+Use **AuK Base** and **AuK-Flash** for speech generation, editing, enhancement,
+and separation through **AuK Model Loader** and **AuK Generate / Edit**.
+Install `.[comfyui]` in the environment that runs ComfyUI, link
+[`comfyui/ComfyUI-AuK`](comfyui/ComfyUI-AuK) into `ComfyUI/custom_nodes`, and
+open the reusable [`auk.json`](comfyui/workflows/auk.json) workflow.
+
+The included workflow starts with Base, PE disabled, and a 3-second text-only
+example. See the [ComfyUI guide](docs/COMFYUI.md) for installation,
+shared `.env` configuration, Flash settings, audio input/output,
+and the integration's 30-second source-plus-target sequence limit.
 
 ### Prompt Enhancer
 
