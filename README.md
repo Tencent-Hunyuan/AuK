@@ -185,6 +185,9 @@ uv pip install -e .
 # Core inference + Gradio + Prompt Enhancer + ASR
 uv pip install -e ".[gradio]"
 
+# Core inference + ComfyUI nodes + Prompt Enhancer + ASR
+uv pip install -e ".[comfyui]"
+
 # Core inference + fine-tuning
 uv pip install -e ".[train]"
 
@@ -204,6 +207,9 @@ pip install -e .
 
 # Core inference + Gradio + Prompt Enhancer + ASR
 pip install -e ".[gradio]"
+
+# Core inference + ComfyUI nodes + Prompt Enhancer + ASR
+pip install -e ".[comfyui]"
 
 # Core inference + fine-tuning
 pip install -e ".[train]"
@@ -429,13 +435,16 @@ auk-gradio --port 8000
 
 ### ComfyUI
 
-The [`comfyui/ComfyUI-AuK`](comfyui/ComfyUI-AuK) custom-node directory provides
-**AuK Model Loader** and **AuK Generate / Edit** nodes for instruction TTS,
-zero-shot TTS, and speech editing. Install AuK with
-`pip install -e ".[comfyui]"`, link the node package into
-`ComfyUI/custom_nodes`, and import the included workflow. See the
-[ComfyUI guide](docs/COMFYUI.md) for weights, Prompt Enhancer, the shared
-30-second sequence limit, playback, and saving.
+Use **AuK Base** and **AuK-Flash** for speech generation, editing, enhancement,
+and separation through **AuK Model Loader** and **AuK Generate / Edit**.
+Install `.[comfyui]` in the environment that runs ComfyUI, link
+[`comfyui/ComfyUI-AuK`](comfyui/ComfyUI-AuK) into `ComfyUI/custom_nodes`, and
+open the reusable [`auk.json`](comfyui/workflows/auk.json) workflow.
+
+The included workflow starts with Base, PE disabled, and a 3-second text-only
+example. See the [ComfyUI guide](docs/COMFYUI.md) for installation,
+shared `.env` configuration, Flash settings, audio input/output,
+and the integration's 30-second source-plus-target sequence limit.
 
 ### Prompt Enhancer
 

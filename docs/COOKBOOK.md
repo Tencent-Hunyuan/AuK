@@ -2,6 +2,13 @@
 
 AuK uses a unified ChatML-style input format, with each task specified by a natural-language instruction and audio supplied when required. This guide provides English and Chinese instruction templates, along with CLI and Python examples.
 
+For ComfyUI, use these instruction templates in **AuK Generate / Edit** and
+connect reference/source audio as described in the [ComfyUI guide](COMFYUI.md).
+With PE enabled, `generation_seconds=0` enables automatic duration estimation;
+with PE disabled, supply a positive duration. The ComfyUI integration also
+checks a shared 30-second source/reference-plus-target budget, so long examples
+may require shorter audio clips.
+
 ## Contents
 
 - [Python API Setup](#python-api-setup)
