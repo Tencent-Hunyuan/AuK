@@ -140,8 +140,22 @@ class AukInfer:
 
     # ------------------------------------------------------------------ helpers
 
-    def _load_audio(self, wav_path: str) -> tuple[torch.Tensor, float]:
-        audio, sr = torchaudio.load(wav_path)
+    def _load_audio(self, source: str | tuple[torch.Tensor, int]) -> tuple[torch.Tensor, float]:
+        if isinstance(source, str):
+            audio, sr = torchaudio.load(source)
+        else:
+            audio, sr = source
+            audio = audio.detach().to(device="cpu", dtype=torch.float32)
+            if audio.ndim == 1:
+                audio = audio.unsqueeze(0)
+            if audio.ndim != 2:
+                raise ValueError(f"Audio tensor must have shape [channels, samples], got {tuple(audio.shape)}.")
+            if not isinstance(sr, int) or sr <= 0:
+                raise ValueError(f"Audio sample rate must be a positive integer, got {sr!r}.")
+            if audio.shape[-1] == 0:
+                raise ValueError("Audio tensor is empty.")
+            if not torch.isfinite(audio).all():
+                raise ValueError("Audio tensor contains NaN or Inf.")
         if audio.shape[0] > 1:
             audio = audio.mean(dim=0, keepdim=True)
         ref_rms = torch.sqrt(torch.mean(torch.square(audio)))
@@ -225,7 +239,7 @@ class AukInfer:
         self,
         messages: list,  # caller-composed ChatML turns (must carry a user audio item)
         *,
-        audio: str | None = None,
+        audio: str | tuple[torch.Tensor, int] | None = None,
         gen_seconds: float | None = None,
         nfe: int = 32,
         cfg_strength: float = 2.0,

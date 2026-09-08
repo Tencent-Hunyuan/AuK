@@ -1,0 +1,353 @@
+{
+  "last_node_id": 5,
+  "last_link_id": 3,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "AuKModelLoader",
+      "pos": [
+        20,
+        120
+      ],
+      "size": [
+        400,
+        260
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "checkpoint_path",
+          "type": "STRING",
+          "widget": {
+            "name": "checkpoint_path"
+          },
+          "link": null
+        },
+        {
+          "name": "config_path",
+          "type": "STRING",
+          "widget": {
+            "name": "config_path"
+          },
+          "link": null
+        },
+        {
+          "name": "qwen_path",
+          "type": "STRING",
+          "widget": {
+            "name": "qwen_path"
+          },
+          "link": null
+        },
+        {
+          "name": "device",
+          "type": "COMBO",
+          "widget": {
+            "name": "device"
+          },
+          "link": null
+        },
+        {
+          "name": "dtype",
+          "type": "COMBO",
+          "widget": {
+            "name": "dtype"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "engine",
+          "type": "AUK_ENGINE",
+          "links": [
+            1
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "AuKModelLoader"
+      },
+      "widgets_values": [
+        "ckpts/AuK/auk_base.safetensors",
+        "",
+        "ckpts/Qwen2.5-Omni-3B",
+        "cuda:0",
+        "bf16"
+      ]
+    },
+    {
+      "id": 2,
+      "type": "LoadAudio",
+      "pos": [
+        20,
+        430
+      ],
+      "size": [
+        400,
+        180
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "audio",
+          "type": "COMBO",
+          "widget": {
+            "name": "audio"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "links": null,
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoadAudio"
+      },
+      "widgets_values": [
+        "auk_input.wav"
+      ]
+    },
+    {
+      "id": 3,
+      "type": "AuKGenerateEdit",
+      "pos": [
+        500,
+        90
+      ],
+      "size": [
+        470,
+        420
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "engine",
+          "type": "AUK_ENGINE",
+          "link": 1
+        },
+        {
+          "name": "instruction",
+          "type": "STRING",
+          "widget": {
+            "name": "instruction"
+          },
+          "link": null
+        },
+        {
+          "name": "generation_seconds",
+          "type": "FLOAT",
+          "widget": {
+            "name": "generation_seconds"
+          },
+          "link": null
+        },
+        {
+          "name": "use_prompt_enhancer",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "use_prompt_enhancer"
+          },
+          "link": null
+        },
+        {
+          "name": "seed",
+          "type": "INT",
+          "widget": {
+            "name": "seed"
+          },
+          "link": null
+        },
+        {
+          "name": "nfe_steps",
+          "type": "INT",
+          "widget": {
+            "name": "nfe_steps"
+          },
+          "link": null
+        },
+        {
+          "name": "cfg_strength",
+          "type": "FLOAT",
+          "widget": {
+            "name": "cfg_strength"
+          },
+          "link": null
+        },
+        {
+          "name": "sway_sampling_coef",
+          "type": "FLOAT",
+          "widget": {
+            "name": "sway_sampling_coef"
+          },
+          "link": null
+        },
+        {
+          "name": "input_audio",
+          "type": "AUDIO",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "generated audio",
+          "type": "AUDIO",
+          "links": [
+            2,
+            3
+          ],
+          "slot_index": 0
+        },
+        {
+          "name": "model instruction",
+          "type": "STRING",
+          "links": null,
+          "slot_index": 1
+        },
+        {
+          "name": "Prompt Enhancer info",
+          "type": "STRING",
+          "links": null,
+          "slot_index": 2
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "AuKGenerateEdit"
+      },
+      "widgets_values": [
+        "Generate speech based on the following description: \"A calm, warm female voice with a clear, moderate pace\". The content to speak is: \"Hello, welcome to AuK.\".",
+        3.0,
+        false,
+        42,
+        32,
+        2.0,
+        -1.0
+      ]
+    },
+    {
+      "id": 4,
+      "type": "PreviewAudio",
+      "pos": [
+        1050,
+        70
+      ],
+      "size": [
+        320,
+        110
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": null,
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PreviewAudio"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 5,
+      "type": "SaveAudioAdvanced",
+      "pos": [
+        1050,
+        240
+      ],
+      "size": [
+        320,
+        130
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 3
+        }
+      ],
+      "outputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": null,
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "SaveAudioAdvanced"
+      },
+      "widgets_values": [
+        "auk/output",
+        "flac"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "auk/output",
+        "format": "flac"
+      }
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      3,
+      0,
+      "AUK_ENGINE"
+    ],
+    [
+      2,
+      3,
+      0,
+      4,
+      0,
+      "AUDIO"
+    ],
+    [
+      3,
+      3,
+      0,
+      5,
+      0,
+      "AUDIO"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.9,
+      "offset": [
+        140,
+        180
+      ]
+    }
+  },
+  "version": 0.4
+}

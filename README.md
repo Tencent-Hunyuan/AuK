@@ -34,6 +34,7 @@
     - [Download the weights](#download-the-weights)
     - [Command-line inference](#command-line-inference)
     - [Interactive Gradio demo](#interactive-gradio-demo)
+    - [ComfyUI](#comfyui)
     - [Prompt Enhancer](#prompt-enhancer)
     - [Python API](#python-api)
   - [Fine-tuning](#fine-tuning)
@@ -425,6 +426,16 @@ Other examples:
 auk-gradio --share
 auk-gradio --port 8000
 ```
+
+### ComfyUI
+
+The [`comfyui/ComfyUI-AuK`](comfyui/ComfyUI-AuK) custom-node directory provides
+**AuK Model Loader** and **AuK Generate / Edit** nodes for instruction TTS,
+zero-shot TTS, and speech editing. Install AuK with
+`pip install -e ".[comfyui]"`, link the node package into
+`ComfyUI/custom_nodes`, and import the included workflow. See the
+[ComfyUI guide](docs/COMFYUI.md) for weights, Prompt Enhancer, the shared
+30-second sequence limit, playback, and saving.
 
 ### Prompt Enhancer
 
