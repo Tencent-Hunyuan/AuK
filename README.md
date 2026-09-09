@@ -17,30 +17,28 @@
 
 ## News
 
-- **[2026/09/07]** 🎉 We open-source **AuK**. Code and model weights are publicly available. Try it on the [🤗 Demo Space](https://huggingface.co/spaces/tencent/AuK) or the [🤖 ModelScope Space](https://modelscope.cn/studios/Tencent-Hunyuan/AuK)!
+- **[2026/09/09]** 🎉 We open-source **AuK**. Code and model weights are publicly available. Try it on the [🤗 Demo Space](https://huggingface.co/spaces/tencent/AuK) or the [🤖 ModelScope Space](https://modelscope.cn/studios/Tencent-Hunyuan/AuK)!
 
 ## Contents
 
-- [AuK: An Open-Source Foundational Model for Speech Generation and Editing](#auk-an-open-source-foundational-model-for-speech-generation-and-editing)
-  - [News](#news)
-  - [Contents](#contents)
-  - [Introduction](#introduction)
-  - [Model Architecture](#model-architecture)
-  - [Supported Tasks](#supported-tasks)
-  - [Quick Start](#quick-start)
-    - [Installation](#installation)
-      - [uv](#uv)
-      - [Conda](#conda)
-    - [Download the weights](#download-the-weights)
-    - [Command-line inference](#command-line-inference)
-    - [Interactive Gradio demo](#interactive-gradio-demo)
-    - [ComfyUI](#comfyui)
-    - [Prompt Enhancer](#prompt-enhancer)
-    - [Python API](#python-api)
-  - [Fine-tuning](#fine-tuning)
-  - [Contributing](#contributing)
-  - [Citation](#citation)
-  - [License](#license)
+- [News](#news)
+- [Introduction](#introduction)
+- [Model Architecture](#model-architecture)
+- [Supported Tasks](#supported-tasks)
+- [Quick Start](#quick-start)
+  - [Installation](#installation)
+    - [uv](#uv)
+    - [Conda](#conda)
+  - [Download the weights](#download-the-weights)
+  - [Command-line inference](#command-line-inference)
+  - [Interactive Gradio demo](#interactive-gradio-demo)
+  - [ComfyUI](#comfyui)
+  - [Prompt Enhancer](#prompt-enhancer)
+  - [Python API](#python-api)
+- [Fine-tuning](#fine-tuning)
+- [Contributing](#contributing)
+- [Citation](#citation)
+- [License](#license)
 
 ## Introduction
 
