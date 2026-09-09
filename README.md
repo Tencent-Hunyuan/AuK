@@ -1,5 +1,9 @@
 <div align="center">
 
+# AuK: An Open-Source Foundational Model for Speech Generation and Editing
+
+</div>
+
 <div align="center">
   <a href=https://auk-project.github.io/ target="_blank"><img src=https://img.shields.io/badge/%F0%9F%8C%90%20Website-AuK-1a73e8.svg height=22px></a>
   <a href=https://arxiv.org/abs/2609.08936 target="_blank"><img src=https://img.shields.io/badge/Report-b5212f.svg?logo=arxiv height=22px></a>
@@ -44,10 +48,10 @@ instruction-based TTS, content and acoustic editing, paralinguistic editing,
 speech enhancement, and source separation through a unified natural-language
 instruction interface. AuK has two variants:
 
-| Model     | Description                               | Weight                                                                                                                              |
-| --------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| AuK       | Base model for high-quality generation    | 🤗[Hugging Face](https://huggingface.co/tencent/AuK) · 🤖 [ModelScope](https://modelscope.cn/models/Tencent-Hunyuan/AuK)             |
-| AuK-Flash | Distilled model for fast 4-step inference | 🤗[Hugging Face](https://huggingface.co/tencent/AuK-Flash) · 🤖 [ModelScope](https://modelscope.cn/models/Tencent-Hunyuan/AuK-Flash) |
+| Model | Description | Weight |
+| --- | --- | --- |
+| AuK | Base model for high-quality generation | 🤗 [Hugging Face](https://huggingface.co/tencent/AuK) · 🤖 [ModelScope](https://modelscope.cn/models/Tencent-Hunyuan/AuK) |
+| AuK-Flash | Distilled model for fast 4-step inference | 🤗 [Hugging Face](https://huggingface.co/tencent/AuK-Flash) · 🤖 [ModelScope](https://modelscope.cn/models/Tencent-Hunyuan/AuK-Flash) |
 
 ## Performance
 
@@ -136,7 +140,7 @@ AuK exposes every task through the same natural-language instruction interface. 
       <td><a href="docs/COOKBOOK.md#45-whisper-conversion">Whisper Conversion</a></td>
     </tr>
     <tr>
-      <td rowspan="4">Enhancement & Separation</td>
+      <td rowspan="4">Enhancement &amp; Separation</td>
       <td>Speech Enhancement</td>
       <td>Denoise, dereverberate, or restore natural, clear speech.</td>
       <td><a href="docs/COOKBOOK.md#51-speech-enhancement">Speech Enhancement</a></td>
@@ -223,7 +227,6 @@ platform requires a specific CPU or CUDA build, install a matching PyTorch stack
 for your platform first, then install AuK with either command above.
 
 ### Download the weights
-
 **🤗 HuggingFace**
 
 ```bash
@@ -265,8 +268,8 @@ ckpts/
 
 The model checkpoint contains the diffusion transformer and layer-fusion weights. The MLLM encoder and VAE are loaded from separate files at runtime, so missing `text_encoder.*` keys during checkpoint loading are expected.
 
-### Command-line inference
 
+### Command-line inference
 All tasks use the same message-based interface. An `--instruction` is always required, while source or reference `--audio` is optional depending on the task. The examples below are just a taste — for the full instruction templates and per-task CLI examples, see the [Cookbook](docs/COOKBOOK.md).
 
 > [!TIP]
@@ -316,7 +319,6 @@ To use AuK-Flash, set:
 ```bash
 --ckpt ckpts/AuK-Flash/auk_flash.safetensors
 ```
-
 AuK-Flash use 4 fixed time steps and set CFG=0.
 
 ### Interactive Gradio demo
@@ -560,15 +562,16 @@ If you find AuK useful in your research, please cite our work:
 
 ```bibtex
 @misc{ma2026auktechnicalreportopensource,
-      title={AuK Technical Report: An Open-Source Foundational Model for Speech Generation and Editing},
-      author={Ziyang Ma and Zhikang Niu and Wenming Tu and Tianrui Wang and Ruiqi Yan and Junxi Liu and Yanru Huo and Nickk Huang and Yang Liu and Qicong Xie and Zeyu Xie and Hui Wang and Haitao Li and Zixuan Jiang and Yalin Li and Jie Fang and Yifan Duan and Zeyue Tian and Guangzheng Li and Haina Zhu and Shuyi Wang and Jinwen Wang and Mingyu Cui and Tian Tan and Auden and Sen Liang and Steve Yves and Shan Yang and Liefeng Bo and Zilong Zheng and Kai Yu and Eng-Siong Chng and Xie Chen},
-      year={2026},
-      eprint={2609.08936},
-      archivePrefix={arXiv},
-      primaryClass={cs.SD},
-      url={https://arxiv.org/abs/2609.08936},
+  title         = {AuK Technical Report: An Open-Source Foundational Model for Speech Generation and Editing},
+  author        = {Ziyang Ma and Zhikang Niu and Wenming Tu and Tianrui Wang and Ruiqi Yan and Junxi Liu and Yanru Huo and Nickk Huang and Yang Liu and Qicong Xie and Zeyu Xie and Hui Wang and Haitao Li and Zixuan Jiang and Yalin Li and Jie Fang and Yifan Duan and Zeyue Tian and Guangzheng Li and Haina Zhu and Shuyi Wang and Jinwen Wang and Mingyu Cui and Tian Tan and Auden and Sen Liang and Steve Yves and Shan Yang and Liefeng Bo and Zilong Zheng and Kai Yu and Eng-Siong Chng and Xie Chen},
+  year          = {2026},
+  eprint        = {2609.08936},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.SD},
+  url           = {https://arxiv.org/abs/2609.08936}
 }
 ```
+
 
 ## License
 
