@@ -19,6 +19,22 @@
 
 - **[2026/09/09]** 🎉 We open-source **AuK**. Code and model weights are publicly available. Try it on the [🤗 Demo Space](https://huggingface.co/spaces/tencent/AuK) or the [🤖 ModelScope Space](https://modelscope.cn/studios/Tencent-Hunyuan/AuK)!
 
+### Demo
+
+<details>
+<summary>English</summary>
+
+https://github.com/user-attachments/assets/d07332fc-5f69-4f16-9d00-a7443cc19e6a
+
+</details>
+
+<details>
+<summary>中文</summary>
+
+https://github.com/user-attachments/assets/c532bbdb-e6ce-4434-a9a5-16f29a8d4135
+
+</details>
+
 ## Contents
 
 - [News](#news)
