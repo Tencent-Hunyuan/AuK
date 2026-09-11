@@ -49,6 +49,8 @@ https://github.com/user-attachments/assets/c532bbdb-e6ce-4434-a9a5-16f29a8d4135
     - [Conda](#conda)
   - [Download the weights](#download-the-weights)
   - [Command-line inference](#command-line-inference)
+    - [Prompt Enhancer](prompt-enhancer)
+    - [CLI Examples](cli-examples)
   - [Interactive Gradio demo](#interactive-gradio-demo)
   - [ComfyUI](#comfyui)
   - [Prompt Enhancer](#prompt-enhancer)
@@ -287,13 +289,45 @@ The model checkpoint contains the diffusion transformer and layer-fusion weights
 
 
 ### Command-line inference
-All tasks use the same message-based interface. An `--instruction` is always required, while source or reference `--audio` is optional depending on the task. The examples below are just a taste — for the full instruction templates and per-task CLI examples, see the [Cookbook](docs/COOKBOOK.md).
 
 > [!TIP]
 > When starting from a free-form request, we recommend using
 > [Prompt Enhancer](#prompt-enhancer). It prepares the model instruction, target
 > duration, and any required audio preprocessing, then prints a ready-to-run
 > one-line `auk-infer` command.
+
+#### Prompt Enhancer
+
+PE uses the same OpenAI-compatible LLM environment variables described above.
+Load them from `.env`, then run:
+
+```bash
+set -a
+source ./.env
+set +a
+
+python src/auk/infer/pe.py \
+  --audio assets/demo-input-audio/whisper/wh-w2n-zh-input.wav \
+  --instruction "Convert this whisper into normal speech while preserving the speaker and content." \
+  --asr auto
+```
+
+PE prints the generated command:
+
+```bash
+auk-infer \
+  --audio assets/after_pe/wh-w2n-zh-input.wav \
+  --instruction 'Convert this whispered speech into normal speech.' \
+  --output assets/after_pe/wh-w2n-zh-input.output.wav \
+  --gen_seconds 8.58
+```
+
+The terminal also shows the detected task and target duration, and writes a
+compact JSON manifest under `assets/after_pe/`.
+
+#### CLI Examples
+
+All tasks use the same message-based interface. An `--instruction` is always required, while source or reference `--audio` is optional depending on the task. The examples below are just a taste — for the full instruction templates and per-task CLI examples, see the [Cookbook](docs/COOKBOOK.md).
 
 **Content editing**
 
@@ -466,35 +500,6 @@ The included workflow starts with Base, PE disabled, and a 3-second text-only
 example. See the [ComfyUI guide](docs/COMFYUI.md) for installation,
 shared `.env` configuration, Flash settings, audio input/output,
 and the integration's 30-second source-plus-target sequence limit.
-
-### Prompt Enhancer
-
-PE uses the same OpenAI-compatible LLM environment variables described above.
-Load them from `.env`, then run:
-
-```bash
-set -a
-source ./.env
-set +a
-
-python src/auk/infer/pe.py \
-  --audio assets/demo-input-audio/whisper/wh-w2n-zh-input.wav \
-  --instruction "Convert this whisper into normal speech while preserving the speaker and content." \
-  --asr auto
-```
-
-PE prints the generated command:
-
-```bash
-auk-infer \
-  --audio assets/after_pe/wh-w2n-zh-input.wav \
-  --instruction 'Convert this whispered speech into normal speech.' \
-  --output assets/after_pe/wh-w2n-zh-input.output.wav \
-  --gen_seconds 8.58
-```
-
-The terminal also shows the detected task and target duration, and writes a
-compact JSON manifest under `assets/after_pe/`.
 
 ### Python API
 
