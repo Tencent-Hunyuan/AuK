@@ -29,7 +29,7 @@ class AuKEngine:
         self.lock = threading.Lock()
 
 
-ENGINE_CACHE: dict[tuple[str, str, str, str, str], AuKEngine] = {}
+ENGINE_CACHE: dict[tuple[str, str, str, str, str, bool], AuKEngine] = {}
 ENGINE_CACHE_LOCK = threading.Lock()
 
 
@@ -116,7 +116,7 @@ class AuKModelLoader(io.ComfyNode):
             category="AuK",
             description=(
                 "Load AuK or AuK-Flash and reuse the same engine for identical settings. "
-                "Models remain resident until ComfyUI exits; changing settings can load another copy."
+                "Engines remain cached until ComfyUI exits; changing settings can load another copy."
             ),
             inputs=[
                 io.String.Input(
@@ -146,6 +146,15 @@ class AuKModelLoader(io.ComfyNode):
                     default=default_dtype,
                     tooltip="Inference autocast dtype. The Qwen encoder is loaded in bf16 by AuK.",
                 ),
+                io.Boolean.Input(
+                    "cpu_offload",
+                    default=False,
+                    optional=True,
+                    tooltip=(
+                        "Offload the Qwen text encoder and DiT to CPU when idle to reduce VRAM use. "
+                        "The VAE remains on CUDA (slower inference)."
+                    ),
+                ),
             ],
             outputs=[AUK_ENGINE.Output("engine", display_name="engine")],
         )
@@ -158,6 +167,7 @@ class AuKModelLoader(io.ComfyNode):
         qwen_path: str,
         device: str,
         dtype: str,
+        cpu_offload: bool = False,
     ) -> io.NodeOutput:
         checkpoint = resolve_path(checkpoint_path.strip())
         if not checkpoint.is_file():
@@ -195,7 +205,7 @@ class AuKModelLoader(io.ComfyNode):
         if device.startswith("cuda") and dtype == "bf16" and not torch.cuda.is_bf16_supported():
             raise ValueError(f"The selected CUDA device does not support bf16: {device}.")
 
-        cache_key = (str(checkpoint), str(config), str(qwen), device, dtype)
+        cache_key = (str(checkpoint), str(config), str(qwen), device, dtype, cpu_offload)
         with ENGINE_CACHE_LOCK:
             engine = ENGINE_CACHE.get(cache_key)
             if engine is None:
@@ -207,6 +217,7 @@ class AuKModelLoader(io.ComfyNode):
                         device=device,
                         dtype=dtype,
                         qwen_path=str(qwen),
+                        cpu_offload=cpu_offload,
                     )
                 )
                 ENGINE_CACHE[cache_key] = engine

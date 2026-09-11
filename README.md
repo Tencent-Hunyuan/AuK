@@ -338,6 +338,24 @@ To use AuK-Flash, set:
 ```
 AuK-Flash use 4 fixed time steps and set CFG=0.
 
+**Lower VRAM usage (CUDA only)**
+
+Add `--cpu_offload` to `auk-infer` or `auk-gradio`, set `cpu_offload=True`
+when constructing `AukInfer`, or enable `cpu_offload` in ComfyUI's
+**AuK Model Loader**. It is disabled by default and works with both AuK variants.
+
+Peak VRAM measured on one NVIDIA A800-SXM4-80GB with bf16 inference:
+
+| Model | Input | CPU offload disabled | CPU offload enabled | VRAM saved |
+|---|---|---:|---:|---:|
+| AuK | Text only, 1.5 s output | 24.78 GiB | 16.75 GiB | 8.03 GiB (32.4%) |
+| AuK | 5 s reference audio | 25.00 GiB | 16.98 GiB | 8.02 GiB (32.1%) |
+| AuK-Flash | Text only, 1.5 s output | 24.77 GiB | 16.75 GiB | 8.02 GiB (32.4%) |
+| AuK-Flash | 5 s reference audio | 24.97 GiB | 16.98 GiB | 7.99 GiB (32.0%) |
+
+The table reports `torch.cuda.max_memory_allocated`; actual usage depends on
+input length, dtype, hardware, and software versions.
+
 ### Interactive Gradio demo
 
 Install the Gradio dependencies with `pip install -e ".[gradio]"` (or the

@@ -30,6 +30,7 @@ dependencies = [
     # transformers / gradio / librosa. Re-enable this pin only if you need to lock 1.x on py3.10.
     # "numpy<=1.26.4; python_version<='3.10'",
     "safetensors",
+    "accelerate>=0.33.0",
 ]
 
 [project.optional-dependencies]
@@ -63,7 +64,6 @@ comfyui = [
 # Extra deps for full DiT fine-tuning (src/auk/train/train.py). Not needed for inference.
 # Install with: pip install -e ".[train]"
 train = [
-    "accelerate>=0.33.0",
     "ema-pytorch",
     "tensorboard",
     "matplotlib",

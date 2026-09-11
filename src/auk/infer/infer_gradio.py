@@ -601,6 +601,11 @@ def main():
     p.add_argument("--qwen_path", default=None)
     p.add_argument("--dtype", choices=["fp16", "bf16", "fp32"], default="bf16")
     p.add_argument("--device", default=None)
+    p.add_argument(
+        "--cpu_offload",
+        action="store_true",
+        help="offload the Qwen text encoder and DiT to CPU when idle; keep the VAE on CUDA",
+    )
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=7860)
     p.add_argument("--share", action="store_true")
@@ -629,7 +634,7 @@ def main():
         CKPT_PATHS[label] = checkpoint
         CONFIG_PATHS[label] = config
 
-    ENGINE_KWARGS.update(device=args.device, dtype=args.dtype, qwen_path=args.qwen_path)
+    ENGINE_KWARGS.update(device=args.device, dtype=args.dtype, qwen_path=args.qwen_path, cpu_offload=args.cpu_offload)
     DEVICE_PATHS[BASE_LABEL] = args.base_device
     DEVICE_PATHS[FLASH_LABEL] = args.flash_device
 
