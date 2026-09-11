@@ -53,7 +53,6 @@ https://github.com/user-attachments/assets/c532bbdb-e6ce-4434-a9a5-16f29a8d4135
     - [CLI Examples](#cli-examples)
   - [Interactive Gradio demo](#interactive-gradio-demo)
   - [ComfyUI](#comfyui)
-  - [Prompt Enhancer](#prompt-enhancer)
   - [Python API](#python-api)
 - [Fine-tuning](#fine-tuning)
 - [Contributing](#contributing)
