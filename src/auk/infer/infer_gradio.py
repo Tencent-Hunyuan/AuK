@@ -9,6 +9,7 @@ import torch
 
 from auk.infer.infer_auk import AukInfer, get_gen_duration
 from auk.infer.pe import PromptEnhancer, PromptEnhancerError
+from auk.serve.client import AukDistributedInfer, build_infer
 
 
 # Static examples derived from the public AuK demo sample list.
@@ -241,22 +242,30 @@ def update_sampling_controls(variant: str):
     )
 
 
-def get_engine(variant: str) -> AukInfer:
+def get_engine(variant: str) -> AukInfer | AukDistributedInfer:
     if variant not in ENGINES:
+        split = bool(ENGINE_KWARGS.get("text_encoder_url") and ENGINE_KWARGS.get("worker_url"))
         ckpt_path = CKPT_PATHS.get(variant)
-        if not ckpt_path or not os.path.isfile(ckpt_path):
+        # split mode drives remote nodes, so local weights are not required here
+        if not split and (not ckpt_path or not os.path.isfile(ckpt_path)):
             raise gr.Error(f"{variant} checkpoint not found: {ckpt_path}")
-        # config.yaml ships next to the checkpoint (release dirs bundle their own)
-        ckpt_dir_config = os.path.join(os.path.dirname(os.path.abspath(ckpt_path)), "config.yaml")
-        config_path = CONFIG_PATHS.get(variant) or ckpt_dir_config
-        if not os.path.isfile(config_path):
-            raise gr.Error(f"config.yaml not found next to {variant} checkpoint: {config_path}")
+        config_path = None
+        if not split:
+            # config.yaml ships next to the checkpoint (release dirs bundle their own)
+            ckpt_dir_config = os.path.join(os.path.dirname(os.path.abspath(ckpt_path)), "config.yaml")
+            config_path = CONFIG_PATHS.get(variant) or ckpt_dir_config
+            if not os.path.isfile(config_path):
+                raise gr.Error(f"config.yaml not found next to {variant} checkpoint: {config_path}")
         gr.Info(f"Loading {variant} … (first load takes ~15s)")
-        ENGINES[variant] = AukInfer(
+        # with --text_encoder_url/--worker_url this builds a thin orchestrator instead of a
+        # local engine, so the UI can drive a split deployment without a GPU of its own
+        ENGINES[variant] = build_infer(
+            ENGINE_KWARGS.get("text_encoder_url"),
+            ENGINE_KWARGS.get("worker_url"),
             config_path=config_path,
             ckpt_path=ckpt_path,
             device=DEVICE_PATHS.get(variant) or ENGINE_KWARGS.get("device"),
-            **{key: value for key, value in ENGINE_KWARGS.items() if key != "device"},
+            **{key: value for key, value in ENGINE_KWARGS.items() if key not in ("device", "text_encoder_url", "worker_url")},
         )
     return ENGINES[variant]
 
@@ -601,6 +610,27 @@ def main():
     p.add_argument("--qwen_path", default=None)
     p.add_argument("--dtype", choices=["fp16", "bf16", "fp32"], default="bf16")
     p.add_argument("--device", default=None)
+    p.add_argument(
+        "--device_map",
+        default=None,
+        help=(
+            "Split the sub-models across devices: 'auto' (dit=cuda:0, qwen=cuda:1, vae=cuda:1) or "
+            "explicit 'dit=cuda:0,qwen=cuda:1,vae=cuda:1'. Overrides --base_device/--flash_device."
+        ),
+    )
+    p.add_argument(
+        "--weight_dtype",
+        choices=["fp32", "bf16", "fp16"],
+        default=None,
+        help="Resident weight dtype for the DiT + Qwen (default fp32). 'bf16' halves resident VRAM.",
+    )
+    p.add_argument(
+        "--text_encoder_url",
+        default=None,
+        help="remote Qwen+layer-fusion node (with --worker_url the UI drives a split deployment)",
+    )
+    p.add_argument("--worker_url", default=None, help="remote VAE+DiT+ODE node")
+    p.add_argument("--timeout", type=float, default=None, help="per-request timeout in seconds (split mode)")
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=7860)
     p.add_argument("--share", action="store_true")
@@ -629,9 +659,20 @@ def main():
         CKPT_PATHS[label] = checkpoint
         CONFIG_PATHS[label] = config
 
-    ENGINE_KWARGS.update(device=args.device, dtype=args.dtype, qwen_path=args.qwen_path)
-    DEVICE_PATHS[BASE_LABEL] = args.base_device
-    DEVICE_PATHS[FLASH_LABEL] = args.flash_device
+    ENGINE_KWARGS.update(
+        device=args.device,
+        dtype=args.dtype,
+        qwen_path=args.qwen_path,
+        device_map=args.device_map,
+        weight_dtype=args.weight_dtype,
+        text_encoder_url=args.text_encoder_url,
+        worker_url=args.worker_url,
+        timeout=args.timeout,
+    )
+    # --device_map wins over the per-variant devices: it is the only way to split a single engine
+    if not args.device_map:
+        DEVICE_PATHS[BASE_LABEL] = args.base_device
+        DEVICE_PATHS[FLASH_LABEL] = args.flash_device
 
     if not CKPT_PATHS:
         p.error("No valid --base_ckpt or --flash_ckpt was found.")

@@ -54,6 +54,7 @@ https://github.com/user-attachments/assets/c532bbdb-e6ce-4434-a9a5-16f29a8d4135
   - [Interactive Gradio demo](#interactive-gradio-demo)
   - [ComfyUI](#comfyui)
   - [Python API](#python-api)
+  - [Multi-GPU and split deployment](#multi-gpu-and-split-deployment)
 - [Fine-tuning](#fine-tuning)
 - [Contributing](#contributing)
 - [Citation](#citation)
@@ -539,6 +540,55 @@ messages = [
 audio, sr = engine.generate(messages, gen_seconds=4.0)
 save_audio(audio, sr, "instruct.wav")
 ```
+
+### Multi-GPU and split deployment
+
+By default the whole pipeline loads onto a single device. Two optional mechanisms relax that,
+and both are off unless you ask for them — existing commands are unaffected.
+
+**Per-submodule placement.** `--device_map` puts the diffusion transformer (`dit`), the MLLM
+text encoder (`qwen`), and the VAE (`vae`) on different devices:
+
+```bash
+auk-infer \
+  --audio assets/demo-input-audio/content-edit/content.wav \
+  --instruction "Replace 'but accepting what we cannot have' with 'and living well with dreams unmet'." \
+  --output out_content_edit.wav \
+  --device_map dit=cuda:0,qwen=cuda:1,vae=cpu
+```
+
+`--device_map auto` spreads them across the visible GPUs. `--weight_dtype bf16` keeps the
+resident weights in bf16 instead of fp32: sampling already computes in bf16 under autocast, so
+this roughly halves resident VRAM without changing the sampling recipe (the VAE stays fp32).
+
+**Split deployment.** The text encoder and the rest of the pipeline can also run as two
+separate processes, on one machine or on two hosts. The client then needs only the Qwen
+tokenizer and no GPU of its own:
+
+```bash
+# Node A — Qwen + layer fusion
+python -m auk.serve text-encoder \
+  --qwen_path ckpts/Qwen2.5-Omni-3B \
+  --ckpt ckpts/AuK/auk_base.safetensors \
+  --device cuda:0 --port 8001
+
+# Node B — VAE + diffusion transformer + ODE sampling
+python -m auk.serve worker \
+  --ckpt ckpts/AuK/auk_base.safetensors \
+  --device cuda:1 --port 8002
+
+# Orchestrator — no local weights, no GPU
+auk-infer \
+  --text_encoder_url http://NODE_A:8001 \
+  --worker_url http://NODE_B:8002 \
+  --audio assets/demo-input-audio/content-edit/content.wav \
+  --instruction "Replace 'but accepting what we cannot have' with 'and living well with dreams unmet'." \
+  --output out_content_edit.wav
+```
+
+The same two flags work with `auk-gradio`. See
+[docs/SPLIT_DEPLOYMENT.md](docs/SPLIT_DEPLOYMENT.md) for the topology, the wire format, and
+operational notes.
 
 ## Fine-tuning
 
