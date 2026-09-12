@@ -32,9 +32,14 @@ class AukInfer:
         device: str | None = None,
         dtype: str = "bf16",
         qwen_path: str | None = None,
+        cpu_offload: bool = False,
     ):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.dtype = _DTYPE_MAP.get(dtype, torch.bfloat16)
+        self.cpu_offload = cpu_offload
+        if cpu_offload and (not self.device.startswith("cuda") or not torch.cuda.is_available()):
+            raise ValueError("cpu_offload requires a CUDA device.")
+        load_device = "cpu" if cpu_offload else self.device
 
         config = OmegaConf.load(config_path)
         if qwen_path:
@@ -80,6 +85,9 @@ class AukInfer:
             vae_ckpt=vae_config.vae_model_path,
             map_location="cpu",
         )
+        # Keep the VAE resident on the inference device. Only Qwen and DiT are
+        # offloaded, preserving the baseline VAE weight_norm execution path
+        # and avoiding VAE CPU<->GPU transfers.
         vae_model = vae_model.to(self.device).eval()
         vae_model.requires_grad_(False)
         self.vae_model = vae_model
@@ -104,8 +112,19 @@ class AukInfer:
 
         # --- load EMA weights (strip "ema_model." prefix; text_encoder.* comes from Qwen snapshot) ---
         self._load_ema_weights(model, ckpt_path)
-        self.model = model.to(self.device)
+        self.model = model.to(load_device)
         self.model.eval()
+
+        if cpu_offload:
+            from accelerate import cpu_offload_with_hook
+            from accelerate.utils import set_module_tensor_to_device
+
+            # Keep only the small layer-fusion parameters on GPU, not the child models.
+            for name, _ in self.model.named_parameters(recurse=False):
+                set_module_tensor_to_device(self.model, name, self.device)
+            _, text_hook = cpu_offload_with_hook(self.model.text_encoder, self.device)
+            _, transformer_hook = cpu_offload_with_hook(self.model.transformer, self.device, prev_module_hook=text_hook)
+            self._offload_hooks = (text_hook, transformer_hook)
 
     def _load_ema_weights(self, model: CFMEdit, ckpt_path: str):
         logger.info(f"Loading model checkpoint from {ckpt_path} ...")
@@ -222,6 +241,8 @@ class AukInfer:
         if torch.isnan(gen_latent).any() or torch.isinf(gen_latent).any():
             raise RuntimeError("Generated latent contains NaN/Inf.")
 
+        if self.cpu_offload:
+            self._offload_hooks[1].offload()
         gen_latent = self.vae_model.denormalize(gen_latent)
         gen_latent = gen_latent.permute(0, 2, 1)  # [1, D, T_new]
 
@@ -277,17 +298,25 @@ class AukInfer:
             sway_sampling_coef = None
             t_grid = [0.0, 0.07612049579620361, 0.2928932309150696, 0.6173166036605835, 1.0]
 
-        audio_out = self._run(
-            ref_audio,
-            ref_rms,
-            messages,
-            gen_latent_len,
-            nfe=nfe,
-            cfg_strength=cfg_strength,
-            sway_sampling_coef=sway_sampling_coef,
-            t_grid=t_grid,
-            seed=seed,
-        )
+        try:
+            audio_out = self._run(
+                ref_audio,
+                ref_rms,
+                messages,
+                gen_latent_len,
+                nfe=nfe,
+                cfg_strength=cfg_strength,
+                sway_sampling_coef=sway_sampling_coef,
+                t_grid=t_grid,
+                seed=seed,
+            )
+        finally:
+            if self.cpu_offload:
+                self.model.transformer.clear_cache()
+                for hook in self._offload_hooks:
+                    hook.offload()
+                with torch.cuda.device(self.device):
+                    torch.cuda.empty_cache()
         return audio_out, self.target_sample_rate
 
 
