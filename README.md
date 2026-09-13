@@ -54,6 +54,7 @@ https://github.com/user-attachments/assets/c532bbdb-e6ce-4434-a9a5-16f29a8d4135
   - [Interactive Gradio demo](#interactive-gradio-demo)
   - [ComfyUI](#comfyui)
   - [Python API](#python-api)
+- [Apple Silicon](#apple-silicon)
 - [Fine-tuning](#fine-tuning)
 - [Contributing](#contributing)
 - [Citation](#citation)
@@ -539,6 +540,122 @@ messages = [
 audio, sr = engine.generate(messages, gen_seconds=4.0)
 save_audio(audio, sr, "instruct.wav")
 ```
+
+## Apple Silicon
+
+On an Apple Silicon Mac, use the MLX backend instead of the PyTorch path above.
+It runs all three model stacks natively on Metal through [MLX](https://github.com/ml-explore/mlx)
+and needs no CUDA. It lives entirely in `src/auk_mlx/`, imports nothing from
+`src/auk/`, and leaves the CUDA path unchanged.
+
+### Setup
+
+```bash
+uv venv --python 3.10 && source .venv/bin/activate
+uv pip install -e ".[mlx]"
+```
+
+`mlx` is an optional extra, so a plain `pip install -e .` pulls nothing new. The
+backend needs Python 3.10 and mlx ≥ 0.29. Download the same weights as above,
+then convert them once into MLX layout:
+
+```bash
+export PYTHONPATH=src
+python -m auk_mlx.convert vae     ckpts/AuK/vae.safetensors        ckpts/mlx/vae.safetensors
+python -m auk_mlx.convert dit     ckpts/AuK/auk_base.safetensors   ckpts/mlx/dit_base.safetensors
+python -m auk_mlx.convert dit     ckpts/AuK-Flash/auk_flash.safetensors ckpts/mlx/dit_flash.safetensors
+python -m auk_mlx.convert thinker ckpts/Qwen2.5-Omni-3B            ckpts/mlx/thinker
+```
+
+Conversion folds the weight-norm pairs and transposes convolution weights; the
+result is about 28 GB of fp32 MLX weights. It is a one-time step — the converted
+files are read directly at inference.
+
+### Inference
+
+```bash
+auk-mlx-infer \
+    --instruction "Say the following with the same voice: 'Hello from Apple Silicon.'" \
+    --audio ref.wav --gen_seconds 4.0 -o out.wav
+
+# AuK-Flash: 4 fixed steps, CFG off
+auk-mlx-infer --flash --instruction "..." --audio ref.wav -o out.wav
+```
+
+Reference audio of any sample rate and channel count is accepted — it is
+downmixed to mono and resampled to 24 kHz, matching what the PyTorch path does.
+Omit `--audio` for Instruct TTS and pass `--gen_seconds`.
+
+### Memory and speed
+
+Base model, 32 steps, 6 s of audio, on an M4 Pro (48 GB):
+
+| | peak memory | RTF |
+| --- | --- | --- |
+| fp32 | 24.3 GB | 6.05 |
+| fp32, `--sequential` | 15.4 GB | 6.05 |
+| 8-bit | 9.1 GB | 6.02 |
+| 8-bit, `--sequential` | 6.1 GB | 6.02 |
+
+RTF is measured on 6 s of audio at 32 steps. Short runs are faster: at the
+cookbook's 4 s output, base-32 runs at RTF 4.2 and AuK-Flash at RTF 0.6–1.8.
+
+Two independent levers, and they compose:
+
+- `--bits 8` quantizes the DiT and the Thinker. MLX quantizes `Linear` and
+  `Embedding` but not `Conv1d`, which suits this model — the DiT is 99.4% Linear
+  and the Thinker 99.8% Linear+Embedding, while the VAE is 99.9% Conv1d and only
+  147M parameters, so it stays fp32 at little cost.
+- `--sequential` holds one stack in memory at a time: the Thinker runs to
+  completion, its weights are freed, then the DiT is built. This is the MLX
+  analogue of the CUDA `--cpu_offload` path and cheaper, since MLX's unified
+  memory makes freeing a deallocation rather than a device-to-host copy.
+
+**Use 8-bit; avoid 4-bit.** At 8 bits the audio is indistinguishable from fp32 —
+mean waveform correlation 0.989, spectral cosine 1.0000, identical ASR
+transcripts, and the same score on all 17 cookbook tasks. At 4 bits English still
+transcribes correctly, but Chinese pronunciation degrades audibly.
+
+Quantization buys memory, not speed: wall clock is flat across all three because
+this workload is compute-bound in the ODE, not bandwidth-bound. To also shrink
+the download, write quantized weights once:
+
+```bash
+python -m auk_mlx.convert quantize ckpts/mlx --bits 8 --variant base
+```
+
+That cuts the DiT from 6.12 GB to 1.75 GB and the Thinker from 14.9 GB to 4.21 GB on
+disk, and reproduces the quantize-at-load-time output to a correlation of
+0.99999999.
+
+### Running the cookbook
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/run_cookbook_mlx.py --flash
+PYTHONPATH=src .venv/bin/python scripts/run_cookbook_mlx.py --base --nfe 32
+PYTHONPATH=src .venv/bin/python scripts/verify_cookbook_mlx.py /tmp/cookbook_mlx/flash
+```
+
+All 17 `docs/COOKBOOK.md` examples run end-to-end. The verifier checks each task
+against its input rather than only asserting the output is finite — content edits
+are transcribed, pitch and volume are measured in cents and dB, separation is
+checked for the expected drop in active frames.
+
+### Accuracy
+
+`python tests/test_parity.py` compares every stage against the PyTorch reference
+on identical inputs, and is the test to run after any change to this backend.
+
+| Stage | relative error |
+| --- | --- |
+| conv / activation / resample primitives | ~1e-7 |
+| VAE encode / decode | 7e-7 / 8e-5 |
+| DiT forward, with and without CFG | ~5e-6 |
+| 16-step CFG Euler trajectory | 2.4e-5 |
+| fused conditioning, text and text+audio | ~5e-6 |
+
+See [docs/MLX.md](docs/MLX.md) for the porting notes, including the four
+non-obvious details that a reimplementation is likely to get wrong.
 
 ## Fine-tuning
 

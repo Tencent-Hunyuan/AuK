@@ -70,13 +70,22 @@ train = [
     "tqdm",
 ]
 
+# Native Apple Silicon (MLX) inference backend. See docs/MLX.md.
+# Install with: pip install -e ".[mlx]"
+mlx = [
+    "mlx>=0.29",
+    "soundfile",
+    "soxr",
+]
+
 [project.scripts]
 "auk-infer" = "auk.infer.infer_cli:main"
 "auk-gradio" = "auk.infer.infer_gradio:main"
+"auk-mlx-infer" = "auk_mlx.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["auk*"]
+include = ["auk*", "auk_mlx*"]
 
 [tool.setuptools.package-data]
 "auk.infer" = ["pe.config.yaml"]
