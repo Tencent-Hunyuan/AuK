@@ -26,6 +26,18 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
+def fuse_hidden_states(all_hidden_states, layer_weights, layer_scale):
+    """ELMo-style learned weighted average over the LLM's per-layer hidden states.
+
+    Lives at module scope because the layer-fusion weights belong to the *text encoder* stage:
+    in a split deployment they run next to the LLM so only the fused embedding crosses the wire.
+    """
+    _, _, d_llm = all_hidden_states[0].shape
+    stacked = torch.stack([F.layer_norm(h, [d_llm]) for h in all_hidden_states[1:]], dim=0)  # (num_layers, B, seq, d_llm)
+    weights = F.softmax(layer_weights, dim=0)
+    return (stacked * weights[:, None, None, None]).sum(dim=0) * layer_scale
+
+
 class CFMEdit(nn.Module):
     def __init__(
         self,
@@ -39,6 +51,7 @@ class CFMEdit(nn.Module):
         t_sampling: str = "uniform",  # 'uniform' | 'logistic_normal'
         P_mean: float = -0.8,
         P_std: float = 0.8,
+        num_text_layers: int | None = None,  # only needed when text_encoder is None
         **_ignored,  # tolerate extra config keys (e.g. legacy schedule fields)
     ):
         super().__init__()
@@ -60,18 +73,39 @@ class CFMEdit(nn.Module):
         self.odeint_kwargs = odeint_kwargs
 
         # --- text encoder (LLM), frozen ---
+        # ``None`` in a split deployment: the worker receives already-fused embeddings and never
+        # loads the LLM. ``self.device`` still resolves to the transformer's device because
+        # ``transformer`` is registered first.
         self.text_encoder = text_encoder
         self.text_processor = text_processor
-        self.text_encoder.requires_grad_(False)
-        self.text_encoder.eval()
+        if self.text_encoder is not None:
+            self.text_encoder.requires_grad_(False)
+            self.text_encoder.eval()
+            num_layers = self.text_encoder.config.text_config.num_hidden_layers
+        else:
+            num_layers = num_text_layers
+        if not num_layers:
+            raise ValueError("num_text_layers is required when text_encoder is None")
 
-        num_layers = self.text_encoder.config.text_config.num_hidden_layers
         self.layer_weights = nn.Parameter(torch.zeros(num_layers))  # logits for softmax
         self.layer_scale = nn.Parameter(torch.ones(1))  # learnable scalar multiplier
 
     @property
     def device(self):
         return next(self.parameters()).device
+
+    @property
+    def text_encoder_device(self):
+        """Device hosting the (frozen) LLM text encoder.
+
+        ``device`` is the DiT's device (``transformer`` is registered first), which is *not*
+        necessarily where the text encoder lives — the two can sit on different GPUs.
+        """
+        if self.text_encoder is None:
+            return self.device
+        for p in self.text_encoder.parameters():
+            return p.device
+        return self.device
 
     def sample_time(self, batch: int, dtype, device) -> torch.Tensor:
         if self.t_sampling == "uniform":
@@ -116,11 +150,14 @@ class CFMEdit(nn.Module):
         )
 
     def encode_text(self, cond_inputs, device) -> torch.Tensor:
-        # Move every tensor in cond_inputs to the target device (BatchFeature.to handles this).
+        # The text encoder may live on a different GPU than the DiT. Run it *where it lives* and
+        # only ship the fused embedding (B, seq, d_llm) back to `device`, instead of dragging the
+        # whole LLM (or its per-layer hidden states) across the bus.
+        te_device = self.text_encoder_device
         if hasattr(cond_inputs, "to"):
-            cond_inputs = cond_inputs.to(device)
+            cond_inputs = cond_inputs.to(te_device)
         else:
-            cond_inputs = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in cond_inputs.items()}
+            cond_inputs = {k: (v.to(te_device) if torch.is_tensor(v) else v) for k, v in cond_inputs.items()}
 
         attention_mask = cond_inputs["attention_mask"]
 
@@ -133,11 +170,12 @@ class CFMEdit(nn.Module):
         all_hidden_states = outputs.hidden_states  # tuple of (num_layers+1) tensors
 
         # --- layer fusion: ELMo-style learned weighted average with per-layer LayerNorm ---
-        _, _, d_llm = all_hidden_states[0].shape
-        stacked = torch.stack([F.layer_norm(h, [d_llm]) for h in all_hidden_states[1:]], dim=0)  # (num_layers, B, seq, d_llm)
-        weights = F.softmax(self.layer_weights, dim=0)
-        hidden = (stacked * weights[:, None, None, None]).sum(dim=0) * self.layer_scale
-        return hidden, attention_mask.bool()
+        hidden = fuse_hidden_states(
+            all_hidden_states,
+            self.layer_weights.to(te_device),
+            self.layer_scale.to(te_device),
+        )
+        return hidden.to(device), attention_mask.to(device).bool()
 
     @torch.no_grad()
     def sample(
@@ -159,9 +197,57 @@ class CFMEdit(nn.Module):
     ):
         # ODE state is target-only; ref audio prepended inside backbone.
         self.eval()
+        text_embeds, context_mask = self.encode_text(text, cond.device)
+        return self.sample_from_embeds(
+            cond,
+            text_embeds,
+            context_mask,
+            duration,
+            lens=lens,
+            steps=steps,
+            cfg_strength=cfg_strength,
+            sway_sampling_coef=sway_sampling_coef,
+            t_grid=t_grid,
+            seed=seed,
+            max_duration=max_duration,
+            vocoder=vocoder,
+            use_epss=use_epss,
+            no_ref_audio=no_ref_audio,
+        )
+
+    @torch.no_grad()
+    def sample_from_embeds(
+        self,
+        cond: float["b n d"],  # VAE latent reference [B, Np, D]
+        text_embeds: float["b nt h"],  # already fused by the text-encoder stage
+        context_mask: bool["b nt"],
+        duration: int | int["b"],
+        *,
+        lens: int["b"] | None = None,
+        steps=32,
+        cfg_strength=1.0,
+        sway_sampling_coef=None,
+        t_grid: list[float] | None = None,  # explicit sampling times (e.g. DMD student time_grid); overrides steps+sway
+        seed: int | None = None,
+        max_duration=65536,
+        vocoder: Callable[[float["b d n"]], float["b nw"]] | None = None,
+        use_epss=True,
+        no_ref_audio=False,
+    ):
+        """Run the flow-matching ODE from pre-computed text embeddings.
+
+        This is the seam for a split deployment: the whole ODE loop stays here so it is never
+        turned into one RPC per solver step.
+        """
+        # ODE state is target-only; ref audio prepended inside backbone.
+        self.eval()
 
         cond = cond.to(next(self.parameters()).dtype)
         batch, cond_seq_len, device = *cond.shape[:2], cond.device
+        # the embedding may arrive in a lower precision than the DiT (e.g. bf16 from a remote
+        # text-encoder node): match it here, or mixed-dtype attention blows up into NaN
+        text_embeds = text_embeds.to(device=device, dtype=cond.dtype)
+        context_mask = context_mask.to(device)
 
         ref_latent = cond  # [B, Np, D]
         if not exists(lens):
@@ -172,8 +258,6 @@ class CFMEdit(nn.Module):
 
         if no_ref_audio:
             ref_latent = torch.zeros_like(ref_latent)
-
-        text_embeds, context_mask = self.encode_text(text, device)
 
         if isinstance(duration, int):
             duration = torch.full((batch,), duration, device=device, dtype=torch.long)
@@ -227,8 +311,12 @@ class CFMEdit(nn.Module):
         elif sway_sampling_coef is not None:
             t = t + sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
 
-        trajectory = odeint(fn, y0, t, **self.odeint_kwargs)
-        self.transformer.clear_cache()
+        # the text-projection cache is mutable module state — always clear it, even on failure,
+        # or the next sample() call would silently reuse the previous request's projection
+        try:
+            trajectory = odeint(fn, y0, t, **self.odeint_kwargs)
+        finally:
+            self.transformer.clear_cache()
         sampled = trajectory[-1]  # [B, max_target_dur, D]
 
         # assemble [ref | generated] to match caller expectations
