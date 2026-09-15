@@ -109,6 +109,10 @@ class AukInfer:
             **schedule_config,
         )
         model = model.to(torch.float32)
+        # The frozen text encoder is loaded in bf16 above; the model-wide fp32 cast
+        # would re-cast it, doubling a 4B-parameter module. Restore it here, while the
+        # model is still on CPU, so the fp32 copy never reaches the GPU.
+        model.text_encoder.to(torch.bfloat16)
 
         # --- load EMA weights (strip "ema_model." prefix; text_encoder.* comes from Qwen snapshot) ---
         self._load_ema_weights(model, ckpt_path)
