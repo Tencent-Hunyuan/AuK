@@ -108,7 +108,7 @@ class AukInfer:
             num_channels=self.latent_dim,
             **schedule_config,
         )
-        model = model.to(torch.float32)
+        model.transformer.to(torch.float32)
 
         # --- load EMA weights (strip "ema_model." prefix; text_encoder.* comes from Qwen snapshot) ---
         self._load_ema_weights(model, ckpt_path)
