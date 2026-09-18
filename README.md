@@ -334,6 +334,24 @@ auk-infer \
 The terminal also shows the detected task and target duration, and writes a
 compact JSON manifest under `assets/after_pe/`.
 
+#### Running PE offline
+
+Pass `--local` to skip the cloud APIs entirely. PE then uses MiniCPM5-2B for its
+LLM stages and SenseVoiceSmall for ASR; the model is downloaded to
+`./ckpts/MiniCPM5-2B` (~4.7 GB) on first use and needs about 5 GB of VRAM.
+
+```bash
+# No .env and no API keys required
+python src/auk/infer/pe.py \
+  --local \
+  --audio assets/demo-input-audio/whisper/wh-w2n-zh-input.wav \
+  --instruction "Convert this whisper into normal speech."
+```
+
+`--local` implies local ASR; an explicit `--asr cloud` still overrides just the
+ASR half. Without the flag PE keeps using the cloud LLM and ASR exactly as
+before.
+
 #### CLI Examples
 
 All tasks use the same message-based interface. An `--instruction` is always required, while source or reference `--audio` is optional depending on the task. The examples below are just a taste — for the full instruction templates and per-task CLI examples, see the [Cookbook](docs/COOKBOOK.md).
@@ -438,6 +456,13 @@ its credentials are configured; if it is unavailable, AuK automatically
 downloads and lazily loads `iic/SenseVoiceSmall` as a CPU fallback. The
 `gradio` extra includes both cloud and local ASR dependencies.
 
+To skip the credentials altogether, add `--local` to any of the commands below.
+Prompt Enhancer then runs MiniCPM5-2B for its LLM stages and SenseVoiceSmall for
+ASR, with no cloud APIs. The model is downloaded to `./ckpts/MiniCPM5-2B`
+(~4.7 GB) on first use and needs about 5 GB of VRAM on top of the generation
+model. Without the flag the demo behaves exactly as before and uses the cloud
+LLM; everything else about the command is unaffected either way.
+
 Choose the model according to your needs:
 
 - **AuK Base**: higher quality, with configurable NFE and CFG.
@@ -458,7 +483,8 @@ auk-gradio \
   --dtype bf16 \
   --host 0.0.0.0 \
   --port 8080 \
-  --preload
+  --preload \
+  --local
 ```
 
 The main options above mean:
@@ -471,6 +497,8 @@ The main options above mean:
 - `--base_device` / `--flash_device`: GPU used by each model.
 - `--preload`: load models during startup; without it, each model is loaded
   on first use.
+- `--local`: run Prompt Enhancer offline (MiniCPM5-2B + SenseVoiceSmall) instead
+  of the cloud LLM/ASR APIs. Drop it to use the cloud.
 - Defaults: `--dtype bf16`, `--host 0.0.0.0`, `--port 7860`.
 
 With the standard directory layout, the shortest command detects every

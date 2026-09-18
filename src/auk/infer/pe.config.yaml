@@ -116,6 +116,11 @@ runtime:
       short_text_speed: 0.3
     output_frames_per_second: 50
     instruct_tts_prompt_version: instructtts_duration_v1_20260822
+  audio:
+    # Hard ceiling on PE input audio. Over-long clips are rejected, never
+    # truncated: silently trimming would desync every span match and duration
+    # ratio computed downstream.
+    max_input_duration_sec: 30
   vad:
     skip_tasks: [enhance_speech, separate_speech, extract_vocals, improve_quality, nonverbal_edit, vocal_edit]
     trim_padding_sec: 0.1

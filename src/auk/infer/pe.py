@@ -72,6 +72,7 @@ WHISPER_PEAK_CEILING = float(_WHISPER_CONFIG["peak_ceiling"])
 VAD_TRIM_PAD_SEC = float(_VAD_CONFIG["trim_padding_sec"])
 VAD_NORM_RMS_THRESHOLD = float(_VAD_CONFIG["low_rms_threshold"])
 VAD_NORM_TARGET_PEAK = float(_VAD_CONFIG["normalized_peak"])
+MAX_INPUT_AUDIO_SEC = float(_RUNTIME["audio"]["max_input_duration_sec"])
 INSTRUCT_DURATION_PROMPT_VERSION = str(_DURATION_CONFIG["instruct_tts_prompt_version"])
 
 EMOTIONS = next(param["labels"] for param in _TASKS["emotion_edit"]["params"] if param["name"] == "emotion")
@@ -733,21 +734,27 @@ class PromptEnhancer:
         asr_engine_model_type: str | None = None,
         llm_timeout: int = LLM_TIMEOUT,
         asr_timeout: int = ASR_TIMEOUT,
+        llm_client: Any | None = None,
     ):
         self.llm_api_key = str(llm_api_key or os.environ.get("LLM_API_KEY") or "").strip()
         self.llm_base_url = str(llm_base_url or os.environ.get("LLM_BASE_URL") or "").strip().rstrip("/")
         self.llm_model = str(llm_model or os.environ.get("LLM_MODEL_NAME") or "").strip()
-        missing_llm_config = [
-            name
-            for name, value in (
-                ("LLM_API_KEY", self.llm_api_key),
-                ("LLM_BASE_URL", self.llm_base_url),
-                ("LLM_MODEL_NAME", self.llm_model),
-            )
-            if not value
-        ]
-        if missing_llm_config:
-            raise ValueError(f"缺少 OpenAI-compatible LLM 配置: {missing_llm_config}")
+        # An injected client (see local_pe.LocalLLMClient) answers the stages
+        # in-process, so the cloud credentials are irrelevant.
+        if llm_client is not None:
+            self.llm_model = self.llm_model or getattr(llm_client, "model_name", "local")
+        else:
+            missing_llm_config = [
+                name
+                for name, value in (
+                    ("LLM_API_KEY", self.llm_api_key),
+                    ("LLM_BASE_URL", self.llm_base_url),
+                    ("LLM_MODEL_NAME", self.llm_model),
+                )
+                if not value
+            ]
+            if missing_llm_config:
+                raise ValueError(f"缺少 OpenAI-compatible LLM 配置: {missing_llm_config}")
 
         self.asr_secret_id = str(
             asr_secret_id or os.environ.get("TENCENTCLOUD_SECRET_ID") or os.environ.get("SecretId") or ""
@@ -761,11 +768,12 @@ class PromptEnhancer:
         self._asr_provider = asr_provider
         self.llm_timeout = llm_timeout
         self.asr_timeout = asr_timeout
-        self._llm_client = OpenAI(
+        self._llm_client = llm_client or OpenAI(
             api_key=self.llm_api_key,
             base_url=self.llm_base_url,
             timeout=self.llm_timeout,
         )
+        self._is_local_llm = llm_client is not None
 
     def prepare(
         self,
@@ -779,6 +787,8 @@ class PromptEnhancer:
             raise ValueError("instruction 不能为空")
         if audio_path and not Path(audio_path).is_file():
             raise FileNotFoundError(audio_path)
+        if audio_path:
+            _check_input_audio_duration(audio_path)
 
         llm_calls: list[LLMCall] = []
         asr = self._transcribe(audio_path) if audio_path else None
@@ -794,7 +804,25 @@ class PromptEnhancer:
             message = "Zero-shot TTS 需要参考音频" if classified.task_type == "zero_shot_tts" else "该任务需要输入音频"
             raise UnsupportedRequestError(message)
 
-        params = self._normalize_params(classified, user_instruction=user_instruction)
+        try:
+            params = self._normalize_params(classified, user_instruction=user_instruction)
+        except UnsupportedRequestError:
+            raise
+        except PromptEnhancerError as exc:
+            # Small local models intermittently drop a slot or a subtype they can
+            # clearly read. One retry naming the gap is enough and costs nothing
+            # in-process, so it is gated to the local backend -- the cloud path
+            # keeps its exact call count and failure behaviour.
+            if not self._is_local_llm:
+                raise
+            classified, retry_call = self._classify(
+                user_instruction,
+                audio_path=audio_path,
+                asr=asr,
+                repair_hint=str(exc),
+            )
+            llm_calls.append(retry_call)
+            params = self._normalize_params(classified, user_instruction=user_instruction)
         instruction_language = classified.language
         if classified.task_type == "nonverbal_edit":
             params, event_call, instruction_language = self._match_nonverbal_event(
@@ -898,13 +926,19 @@ class PromptEnhancer:
             "max_tokens": LLM_MAX_TOKENS,
             "temperature": LLM_TEMPERATURE,
         }
-        if any(provider in self.llm_base_url.lower() for provider in ("deepseek", "tokenhub.tencentmaas.com")):
+        if not self._is_local_llm and any(
+            provider in self.llm_base_url.lower() for provider in ("deepseek", "tokenhub.tencentmaas.com")
+        ):
             request_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
         try:
             response = self._llm_client.chat.completions.create(**request_kwargs)
             data = response.model_dump(mode="json")
         except OpenAIError as exc:
             raise PromptEnhancerError(f"{stage} LLM 调用失败: {type(exc).__name__}: {exc}") from exc
+        except Exception as exc:  # an in-process client raises plain exceptions
+            if not self._is_local_llm:
+                raise
+            raise PromptEnhancerError(f"{stage} 本地 LLM 调用失败: {type(exc).__name__}: {exc}") from exc
         if not response.choices:
             raise PromptEnhancerError(f"{stage} LLM 响应缺少 choices: {str(data)[:300]}")
         message = response.choices[0].message
@@ -927,6 +961,7 @@ class PromptEnhancer:
         *,
         audio_path: str | None,
         asr: ASRCall | None,
+        repair_hint: str | None = None,
     ) -> tuple[_Classified, LLMCall]:
         if audio_path:
             user_lines = ["【用户已上传参考/输入音频】", instruction]
@@ -935,6 +970,12 @@ class PromptEnhancer:
                 user_lines.append(f"【ASR 检测语种】{asr.language or '未知'}")
         else:
             user_lines = ["【用户未上传任何参考/输入音频，只能做纯文本合成 instruct_tts】", instruction]
+        if repair_hint:
+            user_lines.append(
+                f"【上一次回答被拒绝】{repair_hint}。"
+                "请重新作答：补全缺失的 operation_subtype 与槽位，槽位值逐字照抄用户指令里对应的片段"
+                "（用户用引号标出的内容就是槽位值，去掉外层引号）。"
+            )
         call = self._call_llm(
             "classify",
             [
@@ -1341,6 +1382,14 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         help="ASR provider: cloud then local fallback, Tencent Cloud only, or local SenseVoice only",
     )
     parser.add_argument(
+        "--local",
+        action="store_true",
+        help=(
+            "run fully offline: MiniCPM5-2B for the LLM stages (downloaded to ./ckpts on first use) "
+            "and local SenseVoice for ASR, instead of the cloud APIs"
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=_DEFAULT_CLI_OUTPUT_DIR,
@@ -1496,7 +1545,15 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_cli_parser().parse_args(argv)
     prepared = None
     try:
-        enhancer = PromptEnhancer(asr_provider=_cli_asr_provider(args.asr) if args.audio else None)
+        if args.local:
+            from auk.infer.local_pe import build_local_enhancer
+
+            # --local implies local ASR; an explicit --asr cloud still wins.
+            enhancer = build_local_enhancer(
+                asr_provider=_cli_asr_provider(args.asr) if args.audio and args.asr != "auto" else None
+            )
+        else:
+            enhancer = PromptEnhancer(asr_provider=_cli_asr_provider(args.asr) if args.audio else None)
         prepared = enhancer.prepare(
             args.instruction,
             args.audio,
@@ -1867,6 +1924,14 @@ def _audio_duration(audio_path: str) -> float:
     if info.sample_rate <= 0:
         raise PromptEnhancerError(f"输入音频采样率非法: {info.sample_rate}")
     return info.num_frames / info.sample_rate
+
+
+def _check_input_audio_duration(audio_path: str, limit_sec: float = MAX_INPUT_AUDIO_SEC) -> float:
+    """Reject over-long input instead of letting it through to be trimmed later."""
+    duration = _audio_duration(audio_path)
+    if duration > limit_sec:
+        raise UnsupportedRequestError(f"输入音频时长 {duration:.1f}s 超过上限 {limit_sec:.0f}s，请裁剪后重试。")
+    return duration
 
 
 def _load_asr_pcm16(audio_path: str) -> bytes:

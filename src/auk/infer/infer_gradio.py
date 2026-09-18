@@ -8,7 +8,13 @@ import gradio as gr
 import torch
 
 from auk.infer.infer_auk import AukInfer, get_gen_duration
-from auk.infer.pe import PromptEnhancer, PromptEnhancerError
+from auk.infer.pe import (
+    MAX_INPUT_AUDIO_SEC,
+    PromptEnhancer,
+    PromptEnhancerError,
+    UnsupportedRequestError,
+    _audio_duration,
+)
 
 
 # Static examples derived from the public AuK demo sample list.
@@ -304,6 +310,15 @@ def run_generate(variant, audio, instruction, gen_seconds, ref_text, gen_text, n
         raise gr.Error("Please provide an instruction.")
     if not audio and not gen_seconds and not gen_text:
         raise gr.Error("Instruct TTS without reference audio needs a target duration or target text to set the length.")
+    if audio:
+        # Same ceiling the Prompt Enhancer enforces, so disabling PE cannot slip
+        # a longer clip through.
+        try:
+            duration = _audio_duration(audio)
+        except Exception as exc:
+            raise gr.Error(f"Could not read input audio: {exc}") from None
+        if duration > MAX_INPUT_AUDIO_SEC:
+            raise gr.Error(f"输入音频时长 {duration:.1f}s 超过上限 {MAX_INPUT_AUDIO_SEC:.0f}s，请裁剪后重试。")
 
     instruction = instruction.strip()
     content = [{"type": "text", "text": instruction}]
@@ -330,6 +345,33 @@ def run_generate(variant, audio, instruction, gen_seconds, ref_text, gen_text, n
     return _format_output_audio(out_audio, sr, task_type=task_type)
 
 
+_USE_LOCAL_PE = False
+_ENHANCER: PromptEnhancer | None = None
+
+
+def set_local_pe(enabled: bool) -> None:
+    """Select the offline Prompt Enhancer backend (``--local``)."""
+    global _USE_LOCAL_PE, _ENHANCER
+    _USE_LOCAL_PE, _ENHANCER = enabled, None
+
+
+def get_enhancer() -> PromptEnhancer:
+    """Return the Prompt Enhancer, building it on first use.
+
+    Cloud is the default and is constructed exactly as before; ``--local`` swaps
+    in MiniCPM5-2B plus the local SenseVoice ASR that already ships in pe.py.
+    """
+    global _ENHANCER
+    if _ENHANCER is None:
+        if _USE_LOCAL_PE:
+            from auk.infer.local_pe import build_local_enhancer
+
+            _ENHANCER = build_local_enhancer()
+        else:
+            _ENHANCER = PromptEnhancer()
+    return _ENHANCER
+
+
 def run_generate_with_pe(use_pe, variant, audio, instruction, gen_seconds, ref_text, gen_text, nfe, cfg, seed):
     if not use_pe:
         if not gen_seconds:
@@ -339,7 +381,7 @@ def run_generate_with_pe(use_pe, variant, audio, instruction, gen_seconds, ref_t
     prepared = None
     try:
         requested_duration = float(gen_seconds or 0)
-        prepared = PromptEnhancer().prepare(
+        prepared = get_enhancer().prepare(
             instruction,
             audio,
             target_duration=requested_duration if requested_duration > 0 else None,
@@ -370,6 +412,10 @@ def run_generate_with_pe(use_pe, variant, audio, instruction, gen_seconds, ref_t
             "instruction": prepared.instruction,
         }
         return generated, metadata
+    except UnsupportedRequestError as exc:
+        # A user-facing rejection (over-long audio, no-op edit, out-of-scope ask)
+        # reads better without the internal "failed" framing.
+        raise gr.Error(str(exc)) from None
     except (PromptEnhancerError, ValueError, FileNotFoundError) as exc:
         raise gr.Error(f"Prompt Enhancer failed: {type(exc).__name__}: {exc}") from None
     finally:
@@ -609,7 +655,17 @@ def main():
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=7860)
     p.add_argument("--share", action="store_true")
+    p.add_argument(
+        "--local",
+        action="store_true",
+        help=(
+            "run the Prompt Enhancer fully offline with MiniCPM5-2B and SenseVoice instead of "
+            "the cloud LLM/ASR APIs; the model downloads to ./ckpts on first use"
+        ),
+    )
     args = p.parse_args()
+    if args.local:
+        set_local_pe(True)
 
     explicitly_configured = args.base_ckpt is not None or args.flash_ckpt is not None
     candidates = {
