@@ -170,10 +170,14 @@ class CFMEdit(nn.Module):
         all_hidden_states = outputs.hidden_states  # tuple of (num_layers+1) tensors
 
         # --- layer fusion: ELMo-style learned weighted average with per-layer LayerNorm ---
+        # Match the fusion scalars to the (frozen) LLM hidden-state dtype. Under CUDA autocast the
+        # elementwise fusion is silently promoted to fp32, but on MPS/CPU (no autocast) a fp32
+        # layer_weight multiplied into bf16 hidden states is a hard dtype error.
+        h_dtype = all_hidden_states[0].dtype
         hidden = fuse_hidden_states(
             all_hidden_states,
-            self.layer_weights.to(te_device),
-            self.layer_scale.to(te_device),
+            self.layer_weights.to(te_device, dtype=h_dtype),
+            self.layer_scale.to(te_device, dtype=h_dtype),
         )
         return hidden.to(device), attention_mask.to(device).bool()
 
@@ -242,8 +246,20 @@ class CFMEdit(nn.Module):
         # ODE state is target-only; ref audio prepended inside backbone.
         self.eval()
 
-        cond = cond.to(next(self.parameters()).dtype)
+        # Align the reference latent to the DiT's compute dtype. Use the transformer's dtype
+        # explicitly (its weights carry the real bf16/fp32 compute type) rather than
+        # ``next(self.parameters()).dtype``, which can resolve to the fp32 layer-fusion scalars
+        # (layer_weights) and silently make the whole latent/ODE-state float32 — a hard dtype
+        # mismatch against the bf16 DiT on MPS/CPU.
+        cond = cond.to(next(self.transformer.parameters()).dtype)
         batch, cond_seq_len, device = *cond.shape[:2], cond.device
+        # Keep the ODE time grid in float32. Under CUDA autocast the time-embedding linear is
+        # promoted to fp32 anyway, but on MPS/CPU (autocast disabled) the sway-sampling transform
+        # ``1 - cos(pi/2 * t)`` loses precision in bf16 near t=0 and collapses several leading
+        # steps to the same value, breaking torchdiffeq's strictly-monotonic ``t`` assertion.
+        # The per-step time fed to the transformer is still cast to the DiT dtype inside ``fn``,
+        # so the grid being fp32 here does not change the compute dtype of the network.
+        t_dtype = torch.float32
         # the embedding may arrive in a lower precision than the DiT (e.g. bf16 from a remote
         # text-encoder node): match it here, or mixed-dtype attention blows up into NaN
         text_embeds = text_embeds.to(device=device, dtype=cond.dtype)
@@ -271,6 +287,11 @@ class CFMEdit(nn.Module):
             target_mask = None
 
         def fn(t, x):
+            # torchdiffeq.odeint casts the time grid back to float32 internally, so re-align the
+            # time step to the ODE state's compute dtype here. On CUDA autocast promotes the
+            # time-embedding linear anyway; on MPS/CPU (no autocast) a fp32 step into a bf16
+            # time_mlp is a hard dtype error.
+            t = t.to(next(self.transformer.parameters()).dtype)
             if cfg_strength < 1e-5:
                 return self.transformer(
                     x=x,
@@ -305,9 +326,9 @@ class CFMEdit(nn.Module):
             y0.append(torch.randn(dur, self.num_channels, device=self.device, dtype=ref_latent.dtype))
         y0 = pad_sequence(y0, padding_value=0, batch_first=True)
 
-        t = torch.linspace(0, 1, steps + 1, device=self.device, dtype=torch.float32)
+        t = torch.linspace(0, 1, steps + 1, device=self.device, dtype=t_dtype)
         if t_grid is not None:
-            t = torch.tensor(t_grid, device=self.device, dtype=torch.float32)
+            t = torch.tensor(t_grid, device=self.device, dtype=t_dtype)
         elif sway_sampling_coef is not None:
             t = t + sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
 

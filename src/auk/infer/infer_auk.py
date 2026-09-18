@@ -490,7 +490,10 @@ class AukInfer:
             # the DiT is done for this generation: hand its VRAM back before decoding
             self._offload_hooks[1].offload()
         # --- VAE decode (on the VAE's own device) ---
-        gen_latent = self.vae_model.denormalize(gen_latent.to(self.vae_device))
+        # The VAE is always fp32; cast the (possibly bf16) generated latent back to float32 so
+        # the decode runs in a single dtype. On CUDA autocast hides this, but MPS/CPU reject a
+        # mixed bf16-latent / fp32-VAE matmul.
+        gen_latent = self.vae_model.denormalize(gen_latent.float().to(self.vae_device))
         gen_latent = gen_latent.permute(0, 2, 1)  # [1, D, T_new]
 
         gen_audio = self.vae_model.inference_from_latents(gen_latent).cpu()
