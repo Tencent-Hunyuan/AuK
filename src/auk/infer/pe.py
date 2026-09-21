@@ -1988,9 +1988,20 @@ def _prepare_audio(
     return current, cleanup_paths
 
 
+def _remove_temp_file(path: str | None) -> None:
+    """Best-effort removal of a temp file created before a failure on an error path."""
+    if path is None:
+        return
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 def _trim_audio(audio_path: str, bounds: tuple[float, float] | None) -> str:
     if not bounds:
         return audio_path
+    path: str | None = None
     try:
         audio, sample_rate = torchaudio.load(audio_path)
         total = audio.shape[-1]
@@ -2004,6 +2015,7 @@ def _trim_audio(audio_path: str, bounds: tuple[float, float] | None) -> str:
         torchaudio.save(path, audio[:, start:end], sample_rate, encoding="PCM_S", bits_per_sample=16)
         return path
     except Exception:
+        _remove_temp_file(path)
         return audio_path
 
 
@@ -2014,6 +2026,7 @@ def _normalize_audio_level(
     target_lufs: float | None = None,
     use_lufs: bool,
 ) -> str:
+    path: str | None = None
     try:
         waveform, sample_rate = torchaudio.load(audio_path)
         mono = waveform.mean(dim=0).to(torch.float64)
@@ -2045,6 +2058,7 @@ def _normalize_audio_level(
         )
         return path
     except Exception:
+        _remove_temp_file(path)
         return audio_path
 
 
