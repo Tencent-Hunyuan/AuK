@@ -23,9 +23,11 @@
 
 ## News
 
+- **[2026/09/20]** 🧩 **AuK** is now supported by **audio.cpp**! Run **AuK** and **AuK-Flash** with GGUF offline inference via the `--family auk` models — see the [audio.cpp community model doc](https://github.com/0xShug0/audio.cpp/blob/main/docs/community_models/auk.md).
 - **[2026/09/16]** 💻 Reduced encoder memory by **~7.5 GiB**, making local inference more accessible on **consumer GPUs**. See [PR #19](https://github.com/Tencent-Hunyuan/AuK/pull/19).
 - **[2026/09/13]** 🍎🖥️ **AuK** now officially supports **MLX inference on Apple Silicon** (available on the [feat/mlx-apple-silicon](https://github.com/Tencent-Hunyuan/AuK/tree/feat/mlx-apple-silicon) branch) and **CPU offload for CUDA inference**.
 - **[2026/09/13]** 🏆 **AuK** serves as the end-to-end baseline for the **Single Model Track** of the [ICASSP 2027 Audio Editing Challenge](https://audio-editing-challenge.github.io/).
+- **[2026/09/11]** ⚡ **AuK** is now supported by **vLLM-Omni**! Serve **AuK** and **AuK-Flash** as a two-stage pipeline on a single H100 with the [vLLM-Omni recipe](https://github.com/vllm-project/vllm-omni/blob/main/recipes/Tencent/AuK-H100.md).
 - **[2026/09/09]** 🙌 Thanks to **SGLang-Omni** for Day 0 support for **AuK** and **AuK-Flash**! Check out the [SGLang-Omni cookbook](https://sgl-project.github.io/sglang-omni/cookbook/auk.html) to get started.
 - **[2026/09/09]** 🎉 We open-source **AuK**. Code and model weights are publicly available. Try it on the [🤗 Demo Space](https://huggingface.co/spaces/tencent/AuK) or the [🤖 ModelScope Space](https://modelscope.cn/studios/Tencent-Hunyuan/AuK)!
 
