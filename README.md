@@ -23,6 +23,7 @@
 
 ## News
 
+- **[2026/11/10]** 🛠️ The **[VoxCanvas content-editing data pipeline](https://github.com/ZhikangNiu/VoxCanvas)** is now available! **[Refined Emilia transcripts](https://huggingface.co/datasets/zkniu/VoxCanvas#refined-emilia-transcripts)**, re-transcribed with **Qwen3-ASR-1.7B** and provided with alignment timestamps, can be used for **TTS training** to improve the **intelligibility of generated speech**, or as inputs to the pipeline's **edit-annotation stage (stage 1)**.
 - **[2026/10/14]** 🚀 The **distillation training pipeline** is released! Train your own **AuK-Flash** — see [PR #22](https://github.com/Tencent-Hunyuan/AuK/pull/22).
 - **[2026/09/20]** 🧩 **AuK** is now supported by **audio.cpp**! Run **AuK** and **AuK-Flash** with GGUF offline inference via the `--family auk` models — see the [audio.cpp community model doc](https://github.com/0xShug0/audio.cpp/blob/main/docs/community_models/auk.md).
 - **[2026/09/16]** 💻 Reduced encoder memory by **~7.5 GiB**, making local inference more accessible on **consumer GPUs**. See [PR #19](https://github.com/Tencent-Hunyuan/AuK/pull/19).
