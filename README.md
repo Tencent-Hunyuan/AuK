@@ -571,6 +571,24 @@ Conversion folds the weight-norm pairs and transposes convolution weights; the
 result is about 28 GB of fp32 MLX weights. It is a one-time step — the converted
 files are read directly at inference.
 
+### Trimming after conversion
+
+Once the conversion is done, inference reads only `ckpts/mlx/`, each variant's
+`config.yaml`, and the Qwen processor files (tokenizer, chat template, mel
+front end). The torch originals (~25 GB) and, for 8-bit-only setups, the fp32
+MLX copies (~25 GB more) are dead weight and can be removed:
+
+```bash
+python scripts/trim_ckpts.py                 # report what is reclaimable
+python scripts/trim_ckpts.py --apply         # delete the torch originals
+python scripts/trim_ckpts.py --apply --fp32-mlx   # 8-bit-only setups: also drop fp32 MLX
+```
+
+The script refuses to run unless the converted weights are all present, and this
+was verified by running `auk-mlx-infer` against a trimmed tree with identical
+output. Deleting the torch originals means a future re-conversion needs a fresh
+download — that is the only thing lost.
+
 ### Inference
 
 ```bash
