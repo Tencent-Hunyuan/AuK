@@ -584,10 +584,11 @@ python scripts/trim_ckpts.py --apply         # delete the torch originals
 python scripts/trim_ckpts.py --apply --fp32-mlx   # 8-bit-only setups: also drop fp32 MLX
 ```
 
-The script refuses to run unless the converted weights are all present, and this
-was verified by running `auk-mlx-infer` against a trimmed tree with identical
-output. Deleting the torch originals means a future re-conversion needs a fresh
-download — that is the only thing lost.
+The script checks each installed variant for matching DiT and fusion weights,
+along with the shared weights and required configuration files, before deleting
+anything. With `--fp32-mlx`, it also requires the 8-bit DiT for each installed
+variant and the 8-bit Thinker. After that cleanup, run inference with `--bits 8`.
+PyTorch inference and re-conversion require the original weights.
 
 ### Inference
 
