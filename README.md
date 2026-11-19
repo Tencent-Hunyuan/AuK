@@ -189,6 +189,11 @@ AuK exposes every task through the same natural-language instruction interface. 
 Clone the repository, then choose either **uv** or **Conda** to create an
 isolated Python 3.10 environment.
 
+> **macOS 26 and newer:** use Python **≥3.11** instead (e.g. `uv venv --python 3.12`).
+> The newest scipy wheels for Python 3.10 (1.15.x) were built with an older SDK and
+> are rejected by dyld at import (`zero-fill section type ... offset field is not zero`);
+> Python 3.11+ resolves scipy ≥1.16 wheels built with the new SDK.
+
 ```bash
 git clone https://github.com/Tencent-Hunyuan/AuK
 cd AuK
@@ -556,7 +561,8 @@ uv pip install -e ".[mlx]"
 ```
 
 `mlx` is an optional extra, so a plain `pip install -e .` pulls nothing new. The
-backend needs Python 3.10 and mlx ≥ 0.29. Download the same weights as above,
+backend needs Python 3.10 and mlx ≥ 0.29 (Python ≥3.11 on macOS 26+, see
+[Installation](#installation)). Download the same weights as above,
 then convert them once into MLX layout:
 
 ```bash
